@@ -1,3 +1,5 @@
+#include "tio_input_event_strings.h"
+
 enum tio_input_event_type {
     TIO_INPUT_EVENT_TYPE_UNKNOWN = 0,
     TIO_INPUT_EVENT_TYPE_KEY = 1,
@@ -51,7 +53,6 @@ enum tio_input_event_codes {
     COMMA = 44,
     MINUS = 45,
     PERIOD = 46,
-    DOT = 46,
     FORWARD_SLASH = 47,
     ZERO = 48,
     ONE = 49,
@@ -97,9 +98,9 @@ enum tio_input_event_codes {
     UPPERCASE_X = 88,
     UPPERCASE_Y = 89,
     UPPERCASE_Z = 90,
-    OPENING_BRACKET = 91,
+    OPENING_SQUARE_BRACKET = 91,
     BACKSLASH = 92,
-    CLOSING_BRACKET = 93,
+    CLOSING_SQUARE_BRACKET = 93,
     CARET = 94,
     UNDERSCORE = 95,
     GRAVE_ACCENT = 96,
@@ -130,9 +131,9 @@ enum tio_input_event_codes {
     LOWERCASE_X = 120,
     LOWERCASE_Y = 121,
     LOWERCASE_Z = 122,
-    OPENING_BRACE = 123,
+    OPENING_CURLY_BRACE = 123,
     VERTICAL_BAR = 124,
-    CLOSING_BRACE = 125,
+    CLOSING_CURLY_BRACE = 125,
     TILDE = 126,
     BACKSPACE = 127,
 

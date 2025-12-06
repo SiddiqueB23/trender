@@ -476,11 +476,11 @@ int main() {
         fprintf(stderr, "Unable to get window size\n");
         return 1;
     }
-    rows = 360;
-    cols = 640;
+    cols = 80;
+    rows = 50;
     // rows -= 2;
-    // rows *= 10;
-    // cols *= 10;
+    rows *= 20;
+    cols *= 20;
     printf("Window size: %d rows, %d cols\n", rows, cols);
 
     mat4 model_matrix, view_matrix, projection_matrix, model_view_projection, model_view;
@@ -496,7 +496,10 @@ int main() {
 
     update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 
-    enable_raw_mode(STDIN_FILENO);
+    tio_input_event_queue iq;
+    tio_input_queue_init(&iq, 128);
+
+    enable_raw_mode();
     atexit(disable_raw_mode);
     printf("\x1b[2J");   // Clear screen
     printf("\x1b[H");    // Move cursor to home
@@ -510,28 +513,32 @@ int main() {
     while (1) {
         // debug_msg_len = 0;
 
-        tio_input_event event = term_read_key(STDIN_FILENO);
-        if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-            if (event.code == 'q' || event.code == 'Q' || event.code == CTRL_Q)
-                break;
-            if (event.code == 'd') {
-                glm_rotate_y(model_matrix, glm_rad(10.0f), model_matrix);
-                update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-            } else if (event.code == 'a') {
-                glm_rotate_y(model_matrix, glm_rad(-10.0f), model_matrix);
-                update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-            } else if (event.code == 'w') {
-                glm_translate_z(view_matrix, 0.1f);
-                update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-            } else if (event.code == 's') {
-                glm_translate_z(view_matrix, -0.1f);
-                update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-            } else if (event.code == '1') {
-                mode = 1;
-            } else if (event.code == '2') {
-                mode = 2;
-            } else if (event.code == 'c') {
-                clip_triangles = !clip_triangles;
+        // tio_input_event event = term_read_key();
+        update_event_queue(&iq, iq.max_events / 2, iq.max_events / 2);
+        tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
+        while (tio_input_queue_pop(&iq, &event) == 0) {
+            if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
+                if (event.code == 'q' || event.code == 'Q' || event.code == CTRL_Q)
+                    goto end;
+                if (event.code == 'd') {
+                    glm_rotate_y(model_matrix, glm_rad(10.0f), model_matrix);
+                    update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+                } else if (event.code == 'a') {
+                    glm_rotate_y(model_matrix, glm_rad(-10.0f), model_matrix);
+                    update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+                } else if (event.code == 'w') {
+                    glm_translate_z(view_matrix, 0.1f);
+                    update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+                } else if (event.code == 's') {
+                    glm_translate_z(view_matrix, -0.1f);
+                    update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+                } else if (event.code == '1') {
+                    mode = 1;
+                } else if (event.code == '2') {
+                    mode = 2;
+                } else if (event.code == 'c') {
+                    clip_triangles = !clip_triangles;
+                }
             }
         }
 
@@ -545,6 +552,7 @@ int main() {
         // printf("\x1b[0J\r\n%s\r\n", debug_msgs);
     }
 
+end:
     free_framebuffer_4i8(&fb);
     free_framebuffer_f(&depth_buffer);
     tinyobj_attrib_free(&attrib);

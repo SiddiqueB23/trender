@@ -9,8 +9,8 @@ HEADERS := $(wildcard $(SRC_DIR)/*.h)
 hello: $(BUILD_DIR) $(SRC_DIR)/hello.c $(HEADERS)
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/hello $(SRC_DIR)/hello.c $(LDFLAGS)
 
-tio_test: $(BUILD_DIR) $(SRC_DIR)/tio_test.c $(HEADERS)
-	$(CC) $(CFLAGS) -o $(BUILD_DIR)/tio_test $(SRC_DIR)/tio_test.c $(LDFLAGS)
+tio_input_test: $(BUILD_DIR) $(SRC_DIR)/tio_input_test.c $(HEADERS)
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/tio_input_test $(SRC_DIR)/tio_input_test.c $(LDFLAGS)
 
 main: $(BUILD_DIR) $(SRC_DIR)/main.c $(HEADERS)
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/main $(SRC_DIR)/main.c $(LDFLAGS)

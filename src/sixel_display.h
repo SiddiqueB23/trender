@@ -73,7 +73,7 @@ void display_framebuffer_4i8_sixel_ordered_dithering(framebuffer_4i8 fb, int num
     int img_x = fb.width, img_y = fb.height, img_n = 4;
     unsigned char *image_buffer = fb.data;
     printf("\x1b[H");
-    printf("\x1bP0;1;;q");
+    printf("\x1bP8;1;;q");
     int color_num = 0;
     for (int i = 0; i <= num_steps; i++) {
         for (int j = 0; j <= num_steps; j++) {
@@ -199,7 +199,7 @@ void display_framebuffer_4i8_sixel_ordered_dithering_optimized(framebuffer_4i8 f
 
     if (num_steps != last_num_steps) {
         char *palette_ptr = palette_buffer; // Reset pointer to the start
-        palette_ptr += sprintf(palette_ptr, "\x1b[H\x1bP0;1;;q");
+        palette_ptr += sprintf(palette_ptr, "\x1b[H\x1bP9;1;;q");
         int color_num = 0;
         for (int i = 0; i <= num_steps; i++) {
             for (int j = 0; j <= num_steps; j++) {
