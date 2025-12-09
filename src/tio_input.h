@@ -314,85 +314,110 @@ int process_input_buffer_mouse_sequence(input_processing_buffer *ipb, tio_input_
     } else if (c == 'm') {
         released = 1;
     }
-    switch (type) {
-    case 0:
-        if (pressed == 1) {
+    if (pressed == 1) {
+        switch (type) {
+        case 0:
             event->code = LMB_DOWN;
             return processed;
-        } else if (released == 1) {
-            event->code = LMB_UP;
-            return processed;
-        }
-        break;
-    case 1:
-        if (pressed == 1) {
+        case 1:
             event->code = MMB_DOWN;
             return processed;
-        } else if (released == 1) {
-            event->code = MMB_UP;
+        case 2:
+            event->code = CTRL_RMB_DOWN;
             return processed;
-        }
-        break;
-    case 2:
-        if (pressed == 1) {
-            event->code = RMB_DOWN;
+        case 16:
+            event->code = CTRL_LMB_DOWN;
             return processed;
-        } else if (released == 1) {
-            event->code = RMB_UP;
+        case 17:
+            event->code = CTRL_MMB_DOWN;
             return processed;
-        }
-        break;
-    case 32:
-        if (pressed == 1) {
+        case 18:
+            event->code = CTRL_RMB_DOWN;
+            return processed;
+        case 32:
             event->code = LMB_PRESSED_MOVE;
             return processed;
-        }
-        break;
-    case 33:
-        if (pressed == 1) {
+        case 33:
             event->code = MMB_PRESSED_MOVE;
             return processed;
-        }
-        break;
-    case 34:
-        if (pressed == 1) {
+        case 34:
             event->code = RMB_PRESSED_MOVE;
             return processed;
+        case 35:
+            event->code = MOUSE_MOVE;
+            return processed;
+            break;
+        case 48:
+            event->code = CTRL_LMB_PRESSED_MOVE;
+            return processed;
+        case 49:
+            event->code = CTRL_MMB_PRESSED_MOVE;
+            return processed;
+        case 50:
+            event->code = CTRL_RMB_PRESSED_MOVE;
+            return processed;
+        case 51:
+            event->code = CTRL_MOUSE_MOVE;
+            return processed;
+        case 64:
+            event->code = SCROLL_UP;
+            return processed;
+        case 65:
+            event->code = SCROLL_DOWN;
+            return processed;
         }
-        break;
-    case 35: {
-        event->code = MOUSE_MOVE;
-        return processed;
-    }
-    case 64: {
-        event->code = SCROLL_UP;
-        return processed;
-    }
-    case 65: {
-        event->code = SCROLL_DOWN;
-        return processed;
-    }
+    } else if (released == 1) {
+        switch (type) {
+        case 0:
+            event->code = LMB_UP;
+            return processed;
+        case 1:
+            event->code = MMB_UP;
+            return processed;
+        case 2:
+            event->code = CTRL_RMB_UP;
+            return processed;
+        case 16:
+            event->code = CTRL_LMB_UP;
+            return processed;
+        case 17:
+            event->code = CTRL_MMB_UP;
+            return processed;
+        case 18:
+            event->code = CTRL_RMB_UP;
+            return processed;
+        }
     }
     event->type = TIO_INPUT_EVENT_TYPE_UNKNOWN;
     return 0;
 }
 
-const char *keyboard_sequence_strings[26] = {
+#define TIO_KEYBOARD_SEQUENCE_COUNT 82
+
+const char *keyboard_sequence_strings[TIO_KEYBOARD_SEQUENCE_COUNT] = {
     "\x1b[A",
     "\x1b[B",
     "\x1b[C",
     "\x1b[D",
-    "\x1b[H",
-    "\x1b[F",
+
     "\x1b[1;5A",
     "\x1b[1;5B",
     "\x1b[1;5C",
     "\x1b[1;5D",
 
+    "\x1b[H",
+    "\x1b[F",
     "\x1b[2~",
     "\x1b[3~",
     "\x1b[5~",
     "\x1b[6~",
+
+    "\x1b[1;5H",
+    "\x1b[1;5F",
+    "\x1b[2;5~",
+    "\x1b[3;5~",
+    "\x1b[5;5~",
+    "\x1b[6;5~",
 
     "\x1bOP",
     "\x1bOQ",
@@ -406,24 +431,89 @@ const char *keyboard_sequence_strings[26] = {
     "\x1b[21~",
     "\x1b[23~",
     "\x1b[24~",
+
+    "\x1b[1;5P",
+    "\x1b[1;5Q",
+    "\x1b[1;5R",
+    "\x1b[1;5S",
+    "\x1b[15;5~",
+    "\x1b[17;5~",
+    "\x1b[18;5~",
+    "\x1b[19;5~",
+    "\x1b[20;5~",
+    "\x1b[21;5~",
+    "\x1b[23;5~",
+    "\x1b[24;5~",
+
+    "\x1b[E",
+    "\x1b[1;5E",
+    "\x1b[1;2E",
+    "\x1b[1;6E",
+
+    "\x1b[1;2P",
+    "\x1b[1;2Q",
+    "\x1b[1;2R",
+    "\x1b[1;2S",
+    "\x1b[15;2~",
+    "\x1b[17;2~",
+    "\x1b[18;2~",
+    "\x1b[19;2~",
+    "\x1b[20;2~",
+    "\x1b[21;2~",
+    "\x1b[23;2~",
+    "\x1b[24;2~",
+
+    "\x1b[1;6P",
+    "\x1b[1;6Q",
+    "\x1b[1;6R",
+    "\x1b[1;6S",
+    "\x1b[15;6~",
+    "\x1b[17;6~",
+    "\x1b[18;6~",
+    "\x1b[19;6~",
+    "\x1b[20;6~",
+    "\x1b[21;6~",
+    "\x1b[23;6~",
+    "\x1b[24;6~",
+
+    "\x1b[1;2H",
+    "\x1b[1;2F",
+    "\x1b[3;2~",
+    "\x1b[5;2~",
+    "\x1b[6;2~",
+    
+    "\x1b[1;6H",
+    "\x1b[1;6F",
+    "\x1b[3;6~",
+    "\x1b[5;6~",
+    "\x1b[6;6~",
+
 };
 
-int keyboard_sequence_strings_lens[26] = {
+int keyboard_sequence_strings_lens[TIO_KEYBOARD_SEQUENCE_COUNT] = {
     3,
     3,
     3,
     3,
-    3,
-    3,
+
     6,
     6,
     6,
     6,
 
+    3,
+    3,
     4,
     4,
     4,
     4,
+
+    6,
+    6,
+    6,
+    6,
+    6,
+    6,
 
     3,
     3,
@@ -438,24 +528,87 @@ int keyboard_sequence_strings_lens[26] = {
     5,
     5,
 
+    6,
+    6,
+    6,
+    6,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+
+    3,
+    6,
+    6,
+    6,
+
+    6,
+    6,
+    6,
+    6,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+
+    6,
+    6,
+    6,
+    6,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+    7,
+
+    6,
+    6,
+    6,
+    6,
+    6,
+
+    6,
+    6,
+    6,
+    6,
+    6,
 };
 
-int keyboard_sequence_keys[26] = {
+int keyboard_sequence_keys[TIO_KEYBOARD_SEQUENCE_COUNT] = {
     ARROW_UP,
     ARROW_DOWN,
     ARROW_RIGHT,
     ARROW_LEFT,
-    HOME_KEY,
-    END_KEY,
+
     CTRL_ARROW_UP,
     CTRL_ARROW_DOWN,
     CTRL_ARROW_RIGHT,
     CTRL_ARROW_LEFT,
 
+    HOME_KEY,
+    END_KEY,
     INSERT_KEY,
     DEL_KEY,
     PAGE_UP,
     PAGE_DOWN,
+
+    CTRL_HOME_KEY,
+    CTRL_END_KEY,
+    CTRL_INSERT_KEY,
+    CTRL_DEL_KEY,
+    CTRL_PAGE_UP,
+    CTRL_PAGE_DOWN,
 
     FUNCTION_1,
     FUNCTION_2,
@@ -470,10 +623,65 @@ int keyboard_sequence_keys[26] = {
     FUNCTION_11,
     FUNCTION_12,
 
+    CTRL_FUNCTION_1,
+    CTRL_FUNCTION_2,
+    CTRL_FUNCTION_3,
+    CTRL_FUNCTION_4,
+    CTRL_FUNCTION_5,
+    CTRL_FUNCTION_6,
+    CTRL_FUNCTION_7,
+    CTRL_FUNCTION_8,
+    CTRL_FUNCTION_9,
+    CTRL_FUNCTION_10,
+    CTRL_FUNCTION_11,
+    CTRL_FUNCTION_12,
+
+    BEGIN,
+    CTRL_BEGIN,
+    SHIFT_BEGIN,
+    CTRL_SHIFT_BEGIN,
+
+    SHIFT_FUNCTION_1,
+    SHIFT_FUNCTION_2,
+    SHIFT_FUNCTION_3,
+    SHIFT_FUNCTION_4,
+    SHIFT_FUNCTION_5,
+    SHIFT_FUNCTION_6,
+    SHIFT_FUNCTION_7,
+    SHIFT_FUNCTION_8,
+    SHIFT_FUNCTION_9,
+    SHIFT_FUNCTION_10,
+    SHIFT_FUNCTION_11,
+    SHIFT_FUNCTION_12,
+
+    CTRL_SHIFT_FUNCTION_1,
+    CTRL_SHIFT_FUNCTION_2,
+    CTRL_SHIFT_FUNCTION_3,
+    CTRL_SHIFT_FUNCTION_4,
+    CTRL_SHIFT_FUNCTION_5,
+    CTRL_SHIFT_FUNCTION_6,
+    CTRL_SHIFT_FUNCTION_7,
+    CTRL_SHIFT_FUNCTION_8,
+    CTRL_SHIFT_FUNCTION_9,
+    CTRL_SHIFT_FUNCTION_10,
+    CTRL_SHIFT_FUNCTION_11,
+    CTRL_SHIFT_FUNCTION_12,
+
+    SHIFT_HOME_KEY,
+    SHIFT_END_KEY,
+    SHIFT_DEL_KEY,
+    SHIFT_PAGE_UP,
+    SHIFT_PAGE_DOWN,
+
+    CTRL_SHIFT_HOME_KEY,
+    CTRL_SHIFT_END_KEY,
+    CTRL_SHIFT_DEL_KEY,
+    CTRL_SHIFT_PAGE_UP,
+    CTRL_SHIFT_PAGE_DOWN,
 };
 
 int process_input_buffer_keyboard_sequence(input_processing_buffer *ipb, tio_input_event *event) {
-    for (int i = 0; i < 26; i++) {
+    for (int i = 0; i < TIO_KEYBOARD_SEQUENCE_COUNT; i++) {
         const char *seq = keyboard_sequence_strings[i];
         int seq_len = keyboard_sequence_strings_lens[i];
         if (ipb->len >= seq_len) {

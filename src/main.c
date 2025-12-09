@@ -479,8 +479,8 @@ int main() {
     cols = 80;
     rows = 50;
     // rows -= 2;
-    rows *= 20;
-    cols *= 20;
+    rows *= 10;
+    cols *= 10;
     printf("Window size: %d rows, %d cols\n", rows, cols);
 
     mat4 model_matrix, view_matrix, projection_matrix, model_view_projection, model_view;

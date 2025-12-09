@@ -13,14 +13,21 @@ int main() {
             tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
             while (tio_input_queue_pop(&iq, &event) == 0) {
                 if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-                    printf("Key event: code=%d (%s)\r\n", event.code, tio_input_event_code_to_string(event.code));
-                    if (event.code == 'q' || event.code == 'Q' || event.code == CTRL_Q)
+                    if (event.code == ESC)
+                        printf("\",\r\n\"\\x1b");
+                    else if (isprint((char)event.code))
+                        printf("%c", (char)event.code);
+                    else
+                        // printf("\r\n!ERRORRRR!\r\n");
+                    printf("\r\nKey event: code=%d (%s)", event.code, tio_input_event_code_to_string(event.code));
+                    if (event.code == CTRL_Q)
                         goto end;
                 } else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
-                    printf("Mouse event: code=%d (%s) at (%d, %d)\r\n", event.code, tio_input_event_code_to_string(event.code), event.position_x, event.position_y);
+                    // printf("Mouse event: code=%d (%s) at (%d, %d)\r\n", event.code, tio_input_event_code_to_string(event.code), event.position_x, event.position_y);
                 }
             }
         }
+        fflush(stdout);
         // char input_char = -1;
         // int num_bytes = read(STDIN_FILENO, &input_char, 1);
         // if (num_bytes < 0) continue;
