@@ -1,3 +1,6 @@
+#ifndef BAYER_PATTERNS_H
+#define BAYER_PATTERNS_H
+
 const int BAYER_PATTERN_2X2[2][2] = { //	2x2 Bayer Dithering Matrix. Color levels: 5
     {51, 206},
     {153, 102}};
@@ -25,7 +28,7 @@ const int BAYER_PATTERN_8X8[8][8] = { //	8x8 Bayer Dithering Matrix. Color level
     {60, 188, 28, 156, 52, 180, 20, 148},
     {252, 124, 220, 92, 244, 116, 212, 84}};
 
-const int BAYER_PATTERN_16X16[16][16] = { //	16x16 Bayer Dithering Matrix.  Color levels: 256
+const unsigned char BAYER_PATTERN_16X16[16][16] = { //	16x16 Bayer Dithering Matrix.  Color levels: 256
     {0, 191, 48, 239, 12, 203, 60, 251, 3, 194, 51, 242, 15, 206, 63, 254},
     {127, 64, 175, 112, 139, 76, 187, 124, 130, 67, 178, 115, 142, 79, 190, 127},
     {32, 223, 16, 207, 44, 235, 28, 219, 35, 226, 19, 210, 47, 238, 31, 222},
@@ -42,3 +45,5 @@ const int BAYER_PATTERN_16X16[16][16] = { //	16x16 Bayer Dithering Matrix.  Colo
     {137, 74, 185, 122, 133, 70, 181, 118, 136, 73, 184, 121, 132, 69, 180, 117},
     {42, 233, 26, 217, 38, 229, 22, 213, 41, 232, 25, 216, 37, 228, 21, 212},
     {169, 106, 153, 90, 165, 102, 149, 86, 168, 105, 152, 89, 164, 101, 148, 85}};
+
+#endif // BAYER_PATTERNS_H

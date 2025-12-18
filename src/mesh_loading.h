@@ -1,3 +1,6 @@
+#ifndef MESH_LOADING_H
+#define MESH_LOADING_H
+
 #define TINYOBJ_LOADER_C_IMPLEMENTATION
 #include "tinyobj_loader_c.h"
 #include <fcntl.h>
@@ -71,3 +74,5 @@ static int load_mesh(const char *filename, tinyobj_attrib_t *attrib,
                                 num_materials, filename, get_file_data, NULL, flags);
     return ret;
 }
+
+#endif // MESH_LOADING_H

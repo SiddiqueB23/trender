@@ -1,8 +1,11 @@
+#ifndef FRAMEBUFFER_F_H
+#define FRAMEBUFFER_F_H
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct framebuffer_f {
+typedef struct {
     int width;
     int height;
     float *data;
@@ -49,3 +52,5 @@ int clear_framebuffer_f(framebuffer_f *fb, float val) {
     }
     return 0;
 }
+
+#endif // FRAMEBUFFER_F_H

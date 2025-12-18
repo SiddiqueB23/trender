@@ -2,7 +2,7 @@ SRC_DIR := src
 BUILD_DIR := build
 
 CC := gcc
-CFLAGS = -Wall -Wextra -pedantic -O3
+CFLAGS = -Wall -Wextra -pedantic -O3 -march=native -mtune=native -pg -fno-omit-frame-pointer
 LDFLAGS = -lm -lc -lpthread -lrt
 HEADERS := $(wildcard $(SRC_DIR)/*.h)
 
@@ -14,6 +14,9 @@ tio_input_test: $(BUILD_DIR) $(SRC_DIR)/tio_input_test.c $(HEADERS)
 
 main: $(BUILD_DIR) $(SRC_DIR)/main.c $(HEADERS)
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/main $(SRC_DIR)/main.c $(LDFLAGS)
+
+asm_main: $(BUILD_DIR) $(SRC_DIR)/main.c $(HEADERS)
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/main.s $(SRC_DIR)/main.c $(LDFLAGS) -S -fverbose-asm
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)

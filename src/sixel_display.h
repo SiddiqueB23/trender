@@ -1,122 +1,153 @@
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
+#ifndef SIXEL_DISPLAY_H
+#define SIXEL_DISPLAY_H
 
 #include "bayer_patterns.h"
 #include "framebuffer_4i8.h"
-#include "timer.h"
+#include "utils.h"
 
-#ifdef __linux__
-#include <unistd.h>
-#endif
-#ifdef __WIN32
-#define _WIN32_WINNT 0x0A00
-#include <Windows.h>
-#endif
+typedef int sixel_palette_color[3];
 
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+enum sixel_palette_color_type {
+    SIXEL_PALETTE_COLOR_TYPE_HLS = 1,
+    SIXEL_PALETTE_COLOR_TYPE_RGB = 2,
+};
 
-#define CLAMP(x, xmin, xmax) \
-    (x) = MAX((xmin), (x));  \
-    (x) = MIN((xmax), (x))
-#define CLAMPED(x, xmin, xmax) MAX((xmin), MIN((xmax), (x)))
+typedef struct {
+    int size;
+    sixel_palette_color *colors;
+    enum sixel_palette_color_type color_type;
+} sixel_palette;
+
+typedef struct {
+    unsigned char *index_data;
+    int width;
+    int height;
+    sixel_palette palette;
+} sixel_indexed_bitmap;
+
+void init_sixel_indexed_bitmap(sixel_indexed_bitmap *bitmap, int width, int height) {
+    bitmap->width = width;
+    bitmap->height = height;
+    bitmap->index_data = (unsigned char *)malloc(sizeof(unsigned char) * width * height);
+}
+
+void free_sixel_indexed_bitmap(sixel_indexed_bitmap *bitmap) {
+    if (bitmap->index_data) {
+        free(bitmap->index_data);
+        bitmap->index_data = NULL;
+    }
+}
+
+void init_sixel_palette(sixel_palette *palette, int size, enum sixel_palette_color_type color_type) {
+    palette->size = size;
+    palette->color_type = color_type;
+    palette->colors = (sixel_palette_color *)malloc(sizeof(sixel_palette_color) * size);
+}
+
+void free_sixel_palette(sixel_palette *palette) {
+    if (palette->colors) {
+        free(palette->colors);
+        palette->colors = NULL;
+    }
+}
+
+void init_sixel_palette_rgbuniform(sixel_palette *palette, int num_steps) {
+    int size = (num_steps + 1) * (num_steps + 1) * (num_steps + 1);
+    init_sixel_palette(palette, size, SIXEL_PALETTE_COLOR_TYPE_RGB);
+    int color_num = 0;
+    for (int i = 0; i <= num_steps; i++) {
+        for (int j = 0; j <= num_steps; j++) {
+            for (int k = 0; k <= num_steps; k++) {
+                palette->colors[color_num][0] = (100 * i) / num_steps;
+                palette->colors[color_num][1] = (100 * j) / num_steps;
+                palette->colors[color_num][2] = (100 * k) / num_steps;
+                color_num++;
+            }
+        }
+    }
+}
 
 int closest_point(int x, int num_steps) {
     return ((2 * x * num_steps + 255) * num_steps) / 255 / 2 / num_steps;
 }
 
-void display_framebuffer_4i8_sixel(framebuffer_4i8 fb, int num_steps) {
+void convert_4i8_to_sixel_indexed_bitmap_rgbuniform(sixel_indexed_bitmap *bitmap, framebuffer_4i8 fb, int num_steps) {
     int img_x = fb.width, img_y = fb.height, img_n = 4;
     unsigned char *image_buffer = fb.data;
-    printf("\x1b[H");
-    printf("\x1bP0;1;;q");
-    int color_num = 0;
-    for (int i = 0; i <= num_steps; i++) {
-        for (int j = 0; j <= num_steps; j++) {
-            for (int k = 0; k <= num_steps; k++) {
-                printf("#%d;2;%d;%d;%d", color_num,
-                       (100 * i) / num_steps,
-                       (100 * j) / num_steps,
-                       (100 * k) / num_steps);
-                color_num++;
-            }
+    for (int y = 0; y < img_y; y++) {
+        for (int x = 0; x < img_x; x++) {
+            int r = image_buffer[y * img_n * img_x + x * img_n + 0];
+            int g = image_buffer[y * img_n * img_x + x * img_n + 1];
+            int b = image_buffer[y * img_n * img_x + x * img_n + 2];
+
+            int r_x = closest_point(r, num_steps);
+            int g_x = closest_point(g, num_steps);
+            int b_x = closest_point(b, num_steps);
+
+            int color_num = r_x * (num_steps + 1) * (num_steps + 1) + g_x * (num_steps + 1) + b_x;
+
+            bitmap->index_data[y * img_x + x] = color_num;
         }
     }
-    for (int i = 0; i < img_y; i += 6) {
-        for (int y = i; y < i + 6 && y < img_y; y++) {
-            for (int x = 0; x < img_x; x++) {
-                int r = image_buffer[y * img_n * img_x + x * img_n + 0];
-                int g = image_buffer[y * img_n * img_x + x * img_n + 1];
-                int b = image_buffer[y * img_n * img_x + x * img_n + 2];
-
-                int r_x = closest_point(r, num_steps);
-                int g_x = closest_point(g, num_steps);
-                int b_x = closest_point(b, num_steps);
-
-                color_num = r_x * (num_steps + 1) * (num_steps + 1) + g_x * (num_steps + 1) + b_x;
-                printf("#%d%c", color_num, (char)(0x3F + (1 << (y % 6))));
-            }
-            printf("$");
-        }
-        printf("-");
-    }
-    printf("\x1b\\");
-
-    fflush(stdout);
 }
 
-void display_framebuffer_4i8_sixel_ordered_dithering(framebuffer_4i8 fb, int num_steps) {
+void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering(sixel_indexed_bitmap *bitmap, framebuffer_4i8 fb, int num_steps) {
     int img_x = fb.width, img_y = fb.height, img_n = 4;
     unsigned char *image_buffer = fb.data;
-    printf("\x1b[H");
-    printf("\x1bP8;1;;q");
-    int color_num = 0;
-    for (int i = 0; i <= num_steps; i++) {
-        for (int j = 0; j <= num_steps; j++) {
-            for (int k = 0; k <= num_steps; k++) {
-                printf("#%d;2;%d;%d;%d", color_num,
-                       (100 * i) / num_steps,
-                       (100 * j) / num_steps,
-                       (100 * k) / num_steps);
-                color_num++;
-            }
+    unsigned char divider = 256 / num_steps;
+    int step_plus_one = num_steps + 1;
+    int step_plus_one_squared = step_plus_one * step_plus_one;
+
+    for (int y = 0; y < img_y; y++) {
+        unsigned char bayer_y = y % 16;
+        for (int x = 0; x < img_x; x++) {
+            unsigned char bayer_x = x % 16;
+            unsigned char r = image_buffer[y * img_n * img_x + x * img_n + 0];
+            unsigned char g = image_buffer[y * img_n * img_x + x * img_n + 1];
+            unsigned char b = image_buffer[y * img_n * img_x + x * img_n + 2];
+
+            unsigned char t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
+            unsigned char corr = (t / num_steps);
+            unsigned char r_x = (r + corr) / divider;
+            unsigned char g_x = (g + corr) / divider;
+            unsigned char b_x = (b + corr) / divider;
+
+            // r_x = clamp_int(r_x, 0, num_steps);
+            // g_x = clamp_int(g_x, 0, num_steps);
+            // b_x = clamp_int(b_x, 0, num_steps);
+
+            unsigned char color_num = r_x * step_plus_one_squared + g_x * step_plus_one + b_x;
+            // color_num = 215;
+            bitmap->index_data[y * img_x + x] = color_num;
         }
     }
+}
 
-    int divider = 256 / num_steps;
-    for (int i = 0; i < img_y; i += 6) {
-        for (int y = i; y < i + 6 && y < img_y; y++) {
-            int bayer_y = y % 16;
-            for (int x = 0; x < img_x; x++) {
-                int bayer_x = x % 16;
-                int r = image_buffer[y * img_n * img_x + x * img_n + 0];
-                int g = image_buffer[y * img_n * img_x + x * img_n + 1];
-                int b = image_buffer[y * img_n * img_x + x * img_n + 2];
+typedef struct {
+    sixel_indexed_bitmap bitmap;
+    char *data;
+    char *header_data;
+    char *sixel_data;
+    int header_valid;
+    int header_data_size;
+    int data_size;
+} sixel_display_ctx;
 
-                int t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
-                int corr = (t / num_steps);
-                int r_x = (r + corr) / divider;
-                int g_x = (g + corr) / divider;
-                int b_x = (b + corr) / divider;
+void init_sixel_display_ctx(sixel_display_ctx *ctx, int width, int height) {
+    init_sixel_indexed_bitmap(&ctx->bitmap, width, height);
+    ctx->data = (char *)malloc((width * height * 8) + 1024);
+    ctx->header_data = ctx->data;
+    ctx->sixel_data = NULL;
+    ctx->header_valid = 0;
+    ctx->header_data_size = 0;
+    ctx->data_size = 0;
+}
 
-                CLAMP(r_x, 0, num_steps);
-                CLAMP(g_x, 0, num_steps);
-                CLAMP(b_x, 0, num_steps);
-
-                color_num = r_x * (num_steps + 1) * (num_steps + 1) + g_x * (num_steps + 1) + b_x;
-                printf("#%d%c", color_num, (char)(0x3F + (1 << (y % 6))));
-            }
-            printf("$");
-        }
-        printf("-");
+void free_sixel_display_ctx(sixel_display_ctx *ctx) {
+    if (ctx->data) {
+        free(ctx->data);
+        ctx->data = NULL;
     }
-    printf("\x1b\\");
-
-    fflush(stdout);
 }
 
 char *fast_itoa(char *buffer, int value) {
@@ -153,119 +184,34 @@ char *fast_itoa(char *buffer, int value) {
     return buffer;
 }
 
-// A struct to hold our pre-rendered number string and its length.
-// str[4] is enough for 3 digits + null terminator.
-// len is the number of characters (1, 2, or 3).
-typedef struct {
-    char str[4];
-    uint8_t len;
-} lut_entry_t;
-
-// The global Look-Up Table and a flag to ensure it's initialized only once.
-static lut_entry_t g_number_lut[256];
-static bool g_lut_initialized = false;
-
-// This function populates the LUT. It uses sprintf, but since it only
-// runs ONCE, the performance impact is zero during the main loop.
-void initialize_number_lut() {
-    if (g_lut_initialized) {
-        return;
-    }
-    for (int i = 0; i < 256; i++) {
-        // Render the number into the struct's string buffer
-        int length = sprintf(g_number_lut[i].str, "%d", i);
-        g_number_lut[i].len = (uint8_t)length;
-    }
-    g_lut_initialized = true;
-}
-
-// The final, extremely fast conversion function.
-char *fast_itoa_lut255(char *buffer, int value) {
-    // This lookup and copy is much faster than any arithmetic.
-    const lut_entry_t *entry = &g_number_lut[value];
-    memcpy(buffer, entry->str, entry->len);
-    return buffer + entry->len;
-}
-
-void display_framebuffer_4i8_sixel_ordered_dithering_optimized(framebuffer_4i8 fb, int num_steps) {
-    clock_t current_start_time = clock();
-
-    // --- 1. Pre-calculation Stage for Static Palette ---
-
-    // Use static variables to generate and store the palette only on the first call
-    static char palette_buffer[4000];
-    static size_t palette_len = 0;
-    static int last_num_steps = -1;
-
-    if (num_steps != last_num_steps) {
-        char *palette_ptr = palette_buffer; // Reset pointer to the start
+void generate_sixel_display_data(sixel_display_ctx *ctx) {
+    if (!ctx->header_valid) {
+        char *palette_ptr = ctx->header_data; // Reset pointer to the start
         palette_ptr += sprintf(palette_ptr, "\x1b[H\x1bP9;1;;q");
-        int color_num = 0;
-        for (int i = 0; i <= num_steps; i++) {
-            for (int j = 0; j <= num_steps; j++) {
-                for (int k = 0; k <= num_steps; k++) {
-                    palette_ptr += sprintf(palette_ptr, "#%d;2;%d;%d;%d", color_num++,
-                                           (100 * i) / num_steps,
-                                           (100 * j) / num_steps,
-                                           (100 * k) / num_steps);
-                }
-            }
+
+        for (int i = 0; i <= ctx->bitmap.palette.size; i++) {
+            palette_ptr += sprintf(palette_ptr, "#%d;2;%d;%d;%d", i,
+                                   ctx->bitmap.palette.colors[i][0],
+                                   ctx->bitmap.palette.colors[i][1],
+                                   ctx->bitmap.palette.colors[i][2]);
         }
-        palette_len = palette_ptr - palette_buffer; // Store the final length
-        last_num_steps = num_steps;
-        *palette_ptr = '\0';
+
+        ctx->header_data_size = palette_ptr - ctx->header_data; // Store the final length
+        ctx->header_valid = 1;
+        ctx->sixel_data = palette_ptr;
     }
 
-    // --- 2. Buffer Allocation for Pixel Data Only ---
+    char *buffer_ptr = ctx->sixel_data;
 
-    size_t pixel_buffer_size = (fb.width * fb.height * 8) + 1024;
-    static int is_pixel_buffer_initialized = 0;
-    static char *pixel_buffer = NULL;
-    if (!is_pixel_buffer_initialized) {
-        pixel_buffer = (char *)malloc(pixel_buffer_size);
-        is_pixel_buffer_initialized = 1;
-    }
-    if (!pixel_buffer) {
-        return;
-    }
-    char *buffer_ptr = pixel_buffer;
-
-    const int palette_span = num_steps + 1;
-    const int palette_span_squared = palette_span * palette_span;
-    const int divider = 256 / num_steps;
-
-    // --- 3. Optimized Pixel Processing Loop ---
-
-    for (int i = 0; i < fb.height; i += 6) {
+    for (int i = 0; i < ctx->bitmap.height; i += 6) {
         for (int y_offset = 0; y_offset < 6; y_offset++) {
             int y = i + y_offset;
-            if (y >= fb.height) break;
-
-            unsigned char *row_ptr = fb.data + (y * fb.width * 4);
-            int bayer_y = y & 15;
-
-            for (int x = 0; x < fb.width; x++) {
-                int bayer_x = x & 15;
-
-                int r = row_ptr[0];
-                int g = row_ptr[1];
-                int b = row_ptr[2];
-                row_ptr += 4;
-
-                int t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
-                int corr = t / num_steps;
-
-                int r_x = (r + corr) / divider;
-                int g_x = (g + corr) / divider;
-                int b_x = (b + corr) / divider;
-                CLAMP(r_x, 0, num_steps);
-                CLAMP(g_x, 0, num_steps);
-                CLAMP(b_x, 0, num_steps);
-
-                int color_num = r_x * palette_span_squared + g_x * palette_span + b_x;
+            if (y >= ctx->bitmap.height) break;
+            for (int x = 0; x < ctx->bitmap.width; x++) {
+                int color_num = ctx->bitmap.index_data[y * ctx->bitmap.width + x];
 
                 *buffer_ptr++ = '#';
-                buffer_ptr = fast_itoa_lut255(buffer_ptr, color_num);
+                buffer_ptr = fast_itoa(buffer_ptr, color_num);
                 *buffer_ptr++ = (char)(0x3F + (1 << (y_offset)));
             }
             *buffer_ptr++ = '$';
@@ -276,23 +222,7 @@ void display_framebuffer_4i8_sixel_ordered_dithering_optimized(framebuffer_4i8 f
     // Append Sixel terminator to the pixel buffer
     buffer_ptr += sprintf(buffer_ptr, "\x1b\\");
     *buffer_ptr = '\0';
-    // --- 4. Final Write and Cleanup ---
-
-    monotonic_timer_t timer;
-
-    timer_start(&timer);
-#ifdef _WIN32
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD bytesWritten;
-    WriteFile(hConsole, palette_buffer, palette_len, &bytesWritten, NULL);
-    WriteFile(hConsole, pixel_buffer, buffer_ptr - pixel_buffer, &bytesWritten, NULL);
-#endif
-#ifdef __linux__
-    write(STDOUT_FILENO, palette_buffer, palette_len);
-    write(STDOUT_FILENO, pixel_buffer, buffer_ptr - pixel_buffer);
-#endif
-    double elapsed_ms = timer_elapsed_ms(&timer);
-
-    printf("%0.2f\r\n", elapsed_ms);
-    fflush(stdout);
+    ctx->data_size = buffer_ptr - ctx->data;
 }
+
+#endif // SIXEL_DISPLAY_H

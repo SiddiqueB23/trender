@@ -1,8 +1,10 @@
+#ifndef FRAMEBUFFER_4I8_H
+#define FRAMEBUFFER_4I8_H
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct framebuffer_4i8 { // 4 channels, 8 bits per channel
+typedef struct { // 4 channels, 8 bits per channel
     int width;
     int height;
     unsigned char *data;
@@ -55,3 +57,4 @@ int clear_framebuffer_4i8(framebuffer_4i8 *fb, unsigned char r, unsigned char g,
     }
     return 0;
 }
+#endif // FRAMEBUFFER_4I8_H

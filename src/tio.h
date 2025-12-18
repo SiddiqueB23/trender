@@ -1,3 +1,5 @@
+#ifndef TIO_H
+#define TIO_H
 #include "tio_input.h"
 #include <errno.h>
 #include <stdio.h>
@@ -5,7 +7,14 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
+
+#ifdef __linux__
 #include <unistd.h>
+#endif
+#ifdef __WIN32
+#define _WIN32_WINNT 0x0A00
+#include <Windows.h>
+#endif
 
 static struct termios orig_termios;
 
@@ -120,3 +129,18 @@ void disable_mouse_reporting(void) {
     printf("\x1b[?1006l");
     fflush(stdout);
 }
+
+int tio_write(const void *buf, size_t count) {
+#ifdef _WIN32
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD bytesWritten;
+    WriteFile(hConsole, buf, count, &bytesWritten, NULL);
+#endif
+#ifdef __linux__
+    if (write(STDOUT_FILENO, buf, count) == -1) {
+        return -1;
+    }
+#endif
+    return 0;
+}
+#endif // TIO_H

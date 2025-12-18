@@ -4,12 +4,12 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
-#define _POSIX_C_SOURCE 199309L
+// #define _POSIX_C_SOURCE 199309L
 #define _GNU_SOURCE
 #include <time.h>
 #endif
 
-typedef struct monotonic_timer_t{
+typedef struct{
 #if defined(_WIN32)
     LARGE_INTEGER frequency;
     LARGE_INTEGER start_time;
