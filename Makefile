@@ -2,7 +2,7 @@ SRC_DIR := src
 BUILD_DIR := build
 
 CC := gcc
-CFLAGS = -Wall -Wextra -pedantic -O3 -march=native -mtune=native -pg -fno-omit-frame-pointer
+CFLAGS = -Wall -Wextra -pedantic -O3 -march=native -mtune=native -pg -fno-omit-frame-pointer -g
 LDFLAGS = -lm -lc -lpthread -lrt
 HEADERS := $(wildcard $(SRC_DIR)/*.h)
 
