@@ -16,30 +16,36 @@
 #include <Windows.h>
 #endif
 
-static struct termios orig_termios;
+typedef struct tio_ctx {
+    int ifd;
+    int ofd;
+    int rows, cols;
+    struct termios orig_termios;
+    input_processing_buffer_t ipb;
+} tio_ctx_t;
 
-void disable_raw_mode() {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+void disable_raw_mode(tio_ctx_t *ctx) {
+    tcsetattr(ctx->ifd, TCSAFLUSH, &ctx->orig_termios);
 }
 
-int enable_raw_mode() {
+int enable_raw_mode(tio_ctx_t *ctx) {
     struct termios raw;
 
-    if (!isatty(STDIN_FILENO))
+    if (!isatty(ctx->ifd))
         goto fatal;
-    if (tcgetattr(STDIN_FILENO, &orig_termios) == -1)
+    if (tcgetattr(ctx->ifd, &ctx->orig_termios) == -1)
         goto fatal;
 
-    raw = orig_termios;
+    raw = ctx->orig_termios;
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     raw.c_oflag &= ~(OPOST);
     raw.c_cflag |= (CS8);
     // raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN);
     raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
+    raw.c_cc[VTIME] = 0;
 
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0)
+    if (tcsetattr(ctx->ifd, TCSAFLUSH, &raw) < 0)
         goto fatal;
     return 0;
 
@@ -51,17 +57,17 @@ fatal:
 /* Use the ESC [6n escape sequence to query the horizontal cursor position
  * and return it. On error -1 is returned, on success the position of the
  * cursor is stored at *rows and *cols and 0 is returned. */
-int get_cursor_position(int ifd, int ofd, int *rows, int *cols) {
+int get_cursor_position(tio_ctx_t *ctx, int *rows, int *cols) {
     char buf[32];
     unsigned int i = 0;
 
     /* Report cursor location */
-    if (write(ofd, "\x1b[6n", 4) != 4)
+    if (write(ctx->ofd, "\x1b[6n", 4) != 4)
         return -1;
 
     /* Read the response: ESC [ rows ; cols R */
     while (i < sizeof(buf) - 1) {
-        if (read(ifd, buf + i, 1) != 1)
+        if (read(ctx->ifd, buf + i, 1) != 1)
             break;
         if (buf[i] == 'R')
             break;
@@ -81,7 +87,7 @@ int get_cursor_position(int ifd, int ofd, int *rows, int *cols) {
 /* Try to get the number of columns in the current terminal. If the ioctl()
  * call fails the function will try to query the terminal itself.
  * Returns 0 on success, -1 on error. */
-int get_window_size(int ifd, int ofd, int *rows, int *cols) {
+int get_window_size(tio_ctx_t *ctx, int *rows, int *cols) {
     struct winsize ws;
 
     int retval = ioctl(1, TIOCGWINSZ, &ws);
@@ -90,21 +96,21 @@ int get_window_size(int ifd, int ofd, int *rows, int *cols) {
         int orig_row, orig_col, retval;
 
         /* Get the initial position so we can restore it later. */
-        retval = get_cursor_position(ifd, ofd, &orig_row, &orig_col);
+        retval = get_cursor_position(ctx, &orig_row, &orig_col);
         if (retval == -1)
             goto failed;
 
         /* Go to right/bottom margin and get position. */
-        if (write(ofd, "\x1b[999C\x1b[999B", 12) != 12)
+        if (write(ctx->ofd, "\x1b[999C\x1b[999B", 12) != 12)
             goto failed;
-        retval = get_cursor_position(ifd, ofd, rows, cols);
+        retval = get_cursor_position(ctx, rows, cols);
         if (retval == -1)
             goto failed;
 
         /* Restore position. */
         char seq[32];
         snprintf(seq, 32, "\x1b[%d;%dH", orig_row, orig_col);
-        if (write(ofd, seq, strlen(seq)) == -1) {
+        if (write(ctx->ofd, seq, strlen(seq)) == -1) {
             /* Can't recover... */
         }
         return 0;
@@ -130,14 +136,34 @@ void disable_mouse_reporting(void) {
     fflush(stdout);
 }
 
-int tio_write(const void *buf, size_t count) {
+void tio_init(tio_ctx_t *ctx) {
+    ctx->ifd = STDIN_FILENO;
+    ctx->ofd = STDOUT_FILENO;
+    input_processing_buffer_init(&ctx->ipb);
+    enable_raw_mode(ctx);
+    get_window_size(ctx, &ctx->rows, &ctx->cols);
+}
+
+void tio_destroy(tio_ctx_t *ctx) {
+    disable_raw_mode(ctx);
+}
+
+int tio_pop_event_queue(tio_ctx_t *ctx, tio_input_event *event) {
+    return tio_input_pop_event_queue(event, &ctx->ipb);
+}
+
+int tio_get_event_queue_byte_size(tio_ctx_t *ctx) {
+    return tio_input_get_event_queue_byte_size(ctx->ifd, &ctx->ipb);
+}
+
+int tio_write(tio_ctx_t *ctx, const void *buf, size_t count) {
 #ifdef _WIN32
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD bytesWritten;
     WriteFile(hConsole, buf, count, &bytesWritten, NULL);
 #endif
 #ifdef __linux__
-    if (write(STDOUT_FILENO, buf, count) == -1) {
+    if (write(ctx->ofd, buf, count) == -1) {
         return -1;
     }
 #endif
