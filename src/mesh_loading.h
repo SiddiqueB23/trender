@@ -3,16 +3,44 @@
 
 #define TINYOBJ_LOADER_C_IMPLEMENTATION
 #include "tinyobj_loader_c.h"
+
+
+#ifdef _WIN64
+#define atoll(S) _atoi64(S)
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
-static char *mmap_file(size_t *len, const char *filename) {
+static char* mmap_file(size_t* len, const char* filename) {
+#ifdef _WIN64
+    HANDLE file =
+        CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+
+    if (file == INVALID_HANDLE_VALUE) { /* E.g. Model may not have materials. */
+        return NULL;
+    }
+
+    HANDLE fileMapping = CreateFileMapping(file, NULL, PAGE_READONLY, 0, 0, NULL);
+    assert(fileMapping != INVALID_HANDLE_VALUE);
+
+    LPVOID fileMapView = MapViewOfFile(fileMapping, FILE_MAP_READ, 0, 0, 0);
+    char* fileMapViewChar = (char*)fileMapView;
+    assert(fileMapView != NULL);
+
+    DWORD file_size = GetFileSize(file, NULL);
+    (*len) = (size_t)file_size;
+
+    return fileMapViewChar;
+#else
 
     struct stat sb;
-    char *p;
+    char* p;
     int fd;
 
     fd = open(filename, O_RDONLY);
@@ -31,7 +59,7 @@ static char *mmap_file(size_t *len, const char *filename) {
         return NULL;
     }
 
-    p = (char *)mmap(0, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    p = (char*)mmap(0, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
 
     if (p == MAP_FAILED) {
         perror("mmap");
@@ -46,10 +74,43 @@ static char *mmap_file(size_t *len, const char *filename) {
     (*len) = sb.st_size;
 
     return p;
+
+#endif
 }
 
-static void get_file_data(void *ctx, const char *filename, const int is_mtl,
-                          const char *obj_filename, char **data, size_t *len) {
+/* path will be modified */
+static char* get_dirname(char* path) {
+    char* last_delim = NULL;
+
+    if (path == NULL) {
+        return path;
+    }
+
+#if defined(_WIN32)
+    /* TODO: Unix style path */
+    last_delim = strrchr(path, '\\');
+#else
+    last_delim = strrchr(path, '/');
+#endif
+
+    if (last_delim == NULL) {
+        /* no delimiter in the string. */
+        return path;
+    }
+
+    /* remove '/' */
+    last_delim[0] = '\0';
+
+    return path;
+}
+
+static void get_file_data(void* ctx, const char* filename, const int is_mtl,
+    const char* obj_filename, char** data, size_t* len) {
+    // NOTE: If you allocate the buffer with malloc(),
+    // You can define your own memory management struct and pass it through `ctx`
+    // to store the pointer and free memories at clean up stage(when you quit an
+    // app)
+    // This example uses mmap(), so no free() required.
     (void)ctx;
 
     if (!filename) {
