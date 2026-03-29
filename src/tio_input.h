@@ -29,14 +29,6 @@
 #endif
 
 #if TIO_INPUT_LINUX_IMPLEMENTATION
-int tio_input_get_event_queue_byte_size(int ifd, input_processing_buffer_t* ipb) {
-	int current_stdin_bytes = 0;
-	if (ioctl(ifd, FIONREAD, &current_stdin_bytes) == -1) {
-		perror("ioctl");
-		return 1;
-	}
-	return current_stdin_bytes + ipb->len;
-}
 
 #define TIO_INPUT_PROCESSING_BUFFER_MAX_LEN 32
 
@@ -529,6 +521,15 @@ int process_input_buffer_single_character(input_processing_buffer_t* ipb, tio_in
 	event->code = (int)c;
 
 	return 1;
+}
+
+int tio_input_get_event_queue_byte_size(int ifd, input_processing_buffer_t* ipb) {
+	int current_stdin_bytes = 0;
+	if (ioctl(ifd, FIONREAD, &current_stdin_bytes) == -1) {
+		perror("ioctl");
+		return 1;
+	}
+	return current_stdin_bytes + ipb->len;
 }
 
 int tio_input_pop_event_queue(tio_input_event* input_event, input_processing_buffer_t* ipb) {

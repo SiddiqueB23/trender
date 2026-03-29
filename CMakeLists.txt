@@ -13,7 +13,11 @@ add_compile_definitions(RESOURCES_PATH="${CMAKE_SOURCE_DIR}/resources/")
 
 # Platform-specific compiler flags
 if(MSVC)
-  add_compile_options(/W3 /permissive-)
+  # keep optimizations, but generate PDB and ask linker to emit debug info
+  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /Qvec-report:2")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /Qvec-report:2")
+  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
+  set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG")
 else()
   # GCC/Clang
   add_compile_options(-Wall -Wextra -pedantic -O3 -g)
@@ -39,6 +43,20 @@ if(UNIX)
   target_link_libraries(main PRIVATE m rt)
 else()
   target_link_libraries(main PRIVATE)
+endif()
+
+add_executable(sixel_display_test ${CMAKE_SOURCE_DIR}/src/sixel_display_test.c)
+if(UNIX)
+  target_link_libraries(sixel_display_test PRIVATE m rt)
+else()
+  target_link_libraries(sixel_display_test PRIVATE)
+endif()
+
+add_executable(timer_test ${CMAKE_SOURCE_DIR}/src/timer_test.c)
+if(UNIX)
+  target_link_libraries(timer_test PRIVATE m rt)
+else()
+  target_link_libraries(timer_test PRIVATE)
 endif()
 
 # Generate assembly for main.c (only on GCC/Clang, not cross-compiling)

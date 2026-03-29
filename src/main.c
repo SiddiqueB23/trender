@@ -64,8 +64,8 @@ int main() {
 	cols = 80;
 	rows = 50;
 	// rows -= 2;
-	rows *= 10;
-	cols *= 10;
+	rows *= 8;
+	cols *= 8;
 	printf("Window size: %d rows, %d cols\n", rows, cols);
 
 	mat4 model_matrix, view_matrix, projection_matrix, model_view_projection, model_view;
@@ -89,12 +89,16 @@ int main() {
 	init_sixel_indexed_bitmap(&sixel_ctx.bitmap, cols, rows);
 	init_sixel_palette_rgbuniform(&sixel_ctx.bitmap.palette, 5);
 
-	monotonic_timer_t timer;
+	monotonic_timer_t timer, timer_whole;
+	timer_start(&timer_whole);
+
+	double total_rasterization_time = 0.0;
+	double total_conversion_time = 0.0;
+	double total_generation_time = 0.0;
+	double total_display_time = 0.0;
 
 	int num_frames = 100;
 	while (num_frames--) {
-		// debug_msg_len = 0;
-
 		int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&ctx);
 		int event_bytes_processed = 0;
 		while (event_bytes_processed < current_event_queue_bytes_size) {
@@ -135,21 +139,26 @@ int main() {
 		clear_framebuffer_f(&depth_buffer, 1.0f);
 		rasterize_mesh(attrib, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer, texture, tex_width, tex_height);
 		double rasterization_elapsed_ms = timer_elapsed_ms(&timer);
+		total_rasterization_time += rasterization_elapsed_ms;
 
 		timer_start(&timer);
-		// convert_4i8_to_sixel_indexed_bitmap_rgbuniform(&sixel_ctx.bitmap, fb, 5);
-		convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering(&sixel_ctx.bitmap, fb, 5);
+		//convert_4i8_to_sixel_indexed_bitmap_rgbuniform(&sixel_ctx.bitmap, fb, 5);
+		//convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering(&sixel_ctx.bitmap, fb, 5);
+		convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2(&sixel_ctx.bitmap, fb);
 		double conversion_elapsed_ms = timer_elapsed_ms(&timer);
+		total_conversion_time += conversion_elapsed_ms;
 
 		timer_start(&timer);
 		generate_sixel_display_data(&sixel_ctx);
 		double generation_elapsed_ms = timer_elapsed_ms(&timer);
+		total_generation_time += generation_elapsed_ms;
 
 		timer_start(&timer);
 		if (tio_write(&ctx, sixel_ctx.data, sixel_ctx.data_size) == -1) {
 			goto end;
 		}
 		double display_elapsed_ms = timer_elapsed_ms(&timer);
+		total_display_time += display_elapsed_ms;
 
 		printf("\r\n");
 		printf("Rasterization: %0.2f\r\n", rasterization_elapsed_ms);
@@ -157,19 +166,27 @@ int main() {
 		printf("Generation:    %0.2f\r\n", generation_elapsed_ms);
 		printf("Display:       %0.2f\r\n", display_elapsed_ms);
 		fflush(stdout);
-
-		// debug_msgs[debug_msg_len] = '\0';
-		// printf("\x1b[0J\r\n%s\r\n", debug_msgs);
 	}
 
 end:
+
+	printf("\r\n");
+	printf("Total times:\r\n");
+	printf("Rasterization: %0.2f\r\n", total_rasterization_time);
+	printf("Conversion:    %0.2f\r\n", total_conversion_time);
+	printf("Generation:    %0.2f\r\n", total_generation_time);
+	printf("Display:       %0.2f\r\n", total_display_time);
+	fflush(stdout);
 	free_framebuffer_4i8(&fb);
 	free_framebuffer_f(&depth_buffer);
 	tinyobj_attrib_free(&attrib);
 	tinyobj_shapes_free(shapes, num_shapes);
 	tinyobj_materials_free(materials, num_materials);
 
-	// disable_raw_mode(STDIN_FILENO);
+	
+	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);
+	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_elapsed_ms);
+
 	printf("\x1b[?25h"); // Show cursor
 	fflush(stdout);
 

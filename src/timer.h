@@ -1,16 +1,30 @@
 #ifndef TIMER_H
 #define TIMER_H
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(_WIN64) 
+#define TIMER_WINDOWS_IMPLEMENTATION 1
+#else
+#define TIMER_WINDOWS_IMPLEMENTATION 0
+#endif
+
+#if defined(__linux__) || defined(__linux) || defined(__gnu_linux__)
+#define TIMER_LINUX_IMPLEMENTATION 1  
+#define TIMER_WINDOWS_IMPLEMENTATION 0
+#else
+#define TIMER_LINUX_IMPLEMENTATION 0
+#define TIMER_WINDOWS_IMPLEMENTATION 1
+#endif
+
+#if TIMER_WINDOWS_IMPLEMENTATION
 #include <windows.h>
 #else
-// #define _POSIX_C_SOURCE 199309L
+ //#define _POSIX_C_SOURCE 199309L
 #define _GNU_SOURCE
 #include <time.h>
 #endif
 
 typedef struct{
-#if defined(_WIN32)
+#if TIMER_WINDOWS_IMPLEMENTATION
     LARGE_INTEGER frequency;
     LARGE_INTEGER start_time;
 #else
@@ -20,7 +34,7 @@ typedef struct{
 
 static inline void timer_start(monotonic_timer_t* timer) {
     if (timer == NULL) return;
-#if defined(_WIN32)
+#if TIMER_WINDOWS_IMPLEMENTATION
     QueryPerformanceFrequency(&timer->frequency);
     QueryPerformanceCounter(&timer->start_time);
 #else
@@ -30,7 +44,7 @@ static inline void timer_start(monotonic_timer_t* timer) {
 
 static inline double timer_elapsed_s(monotonic_timer_t* timer) {
     if (timer == NULL) return 0.0;
-#if defined(_WIN32)
+#if TIMER_WINDOWS_IMPLEMENTATION
     LARGE_INTEGER current_time;
     QueryPerformanceCounter(&current_time);
     return (double)(current_time.QuadPart - timer->start_time.QuadPart) / timer->frequency.QuadPart;
