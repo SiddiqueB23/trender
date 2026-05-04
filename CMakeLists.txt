@@ -14,13 +14,13 @@ add_compile_definitions(RESOURCES_PATH="${CMAKE_SOURCE_DIR}/resources/")
 # Platform-specific compiler flags
 if(MSVC)
   # keep optimizations, but generate PDB and ask linker to emit debug info
-  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /Qvec-report:2")
-  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /Qvec-report:2")
+  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /Qvec-report:2 /Qpar /Qpar-report:2")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /Qvec-report:2 /Qpar /Qpar-report:2")
   set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
   set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG")
 else()
   # GCC/Clang
-  add_compile_options(-Wall -Wextra -pedantic -O3 -g)
+  add_compile_options(-Wall -Wextra -pedantic -O3 -g -march=native -mtune=native)
   
   # Native optimization only for native builds (not cross-compiling)
   if(NOT CMAKE_CROSSCOMPILING)
@@ -57,6 +57,13 @@ if(UNIX)
   target_link_libraries(timer_test PRIVATE m rt)
 else()
   target_link_libraries(timer_test PRIVATE)
+endif()
+
+add_executable(triangle_drawing_test ${CMAKE_SOURCE_DIR}/src/triangle_drawing_test.c)
+if(UNIX)
+  target_link_libraries(triangle_drawing_test PRIVATE m rt)
+else()
+  target_link_libraries(triangle_drawing_test PRIVATE)
 endif()
 
 # Generate assembly for main.c (only on GCC/Clang, not cross-compiling)

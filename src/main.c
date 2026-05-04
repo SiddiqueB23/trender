@@ -20,6 +20,28 @@ void update_matrices(mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix
 	glm_mat3_transpose(normal_matrix);
 }
 
+float scale_x = 1.0f, scale_y = 1.0f, scale_z = 1.0f;
+float translate_x = 0.0f, translate_y = -1.0f, translate_z = 0.0f;
+float rotate_angle = 0.0;
+void update_model_matrix(mat4 model_matrix) {
+	glm_mat4_identity(model_matrix);
+	glm_scale(model_matrix, (vec3) { scale_x, scale_y, scale_z });
+	glm_rotate_y(model_matrix, glm_rad(rotate_angle), model_matrix);
+	glm_translate(model_matrix, (vec3) { translate_x, translate_y, translate_z });
+}
+
+float camera_x = 0.0f, camera_y = 2.0f, camera_z = -2.0f;
+float camera_pitch = 0.0f, camera_yaw = 0.0f;
+void update_view_matrix(mat4 view_matrix) {
+	glm_mat4_identity(view_matrix);
+	glm_rotate_x(view_matrix, glm_rad(camera_pitch), view_matrix);
+	glm_rotate_y(view_matrix, glm_rad(camera_yaw), view_matrix);
+	glm_translate(view_matrix, (vec3) { -camera_x, -camera_y, camera_z });
+}
+
+float near_plane = 0.5f;
+float far_plane = 10.0f;
+
 tio_ctx_t ctx;
 
 void cleanup(void) {
@@ -62,23 +84,23 @@ int main() {
 		return 1;
 	}
 	cols = 80;
-	rows = 50;
-	// rows -= 2;
+	rows = 45;
+	//rows *= 2;
+	//rows -= 2;
 	rows *= 8;
 	cols *= 8;
 	printf("Window size: %d rows, %d cols\n", rows, cols);
 
+	init_gamma_lut();
+
 	mat4 model_matrix, view_matrix, projection_matrix, model_view_projection, model_view;
 	mat3 normal_matrix;
-	glm_mat4_identity(model_matrix);
-	glm_mat4_identity(view_matrix);
 	glm_mat4_identity(projection_matrix);
-	glm_scale(model_matrix, (vec3) { 4.0f, 4.0f, 1.0f });
-	glm_translate(model_matrix, (vec3) { 0.0f, -2.1f, -5.0f });
-	glm_rotate_y(model_matrix, glm_rad(45.0f), model_matrix);
-	glm_translate(view_matrix, (vec3) { 0.0f, 0.0f, -3.0f });
-	glm_perspective(glm_rad(45.0f), (float)cols / (float)rows, near_plane, far_plane, projection_matrix);
+	glm_translate(view_matrix, (vec3) { 0.0f, 0.0f, 0.0f });
+	glm_perspective(glm_rad(90.0f), (float)cols / (float)rows, near_plane, far_plane, projection_matrix);
 
+	update_model_matrix(model_matrix);
+	update_view_matrix(view_matrix);
 	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 
 	framebuffer_4i8 fb = create_framebuffer_4i8(cols, rows);
@@ -97,7 +119,7 @@ int main() {
 	double total_generation_time = 0.0;
 	double total_display_time = 0.0;
 
-	int num_frames = 100;
+	int num_frames = 1000;
 	while (num_frames--) {
 		int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&ctx);
 		int event_bytes_processed = 0;
@@ -106,38 +128,72 @@ int main() {
 			int bytes_processed = tio_pop_event_queue(&ctx, &event);
 			event_bytes_processed += bytes_processed;
 			if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-				if (event.code == 'q' || event.code == 'Q' || event.code == CTRL_Q)
+				if (event.code == 'Q' || event.code == CTRL_Q) {
 					goto end;
-				if (event.code == 'd') {
-					glm_rotate_y(model_matrix, glm_rad(10.0f), model_matrix);
+				}
+				else if (event.code == 'd') {
+					camera_x += 0.1f;
+					update_view_matrix(view_matrix);
 					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 				}
 				else if (event.code == 'a') {
-					glm_rotate_y(model_matrix, glm_rad(-10.0f), model_matrix);
+					camera_x -= 0.1f;
+					update_view_matrix(view_matrix);
 					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 				}
 				else if (event.code == 'w') {
-					glm_translate_z(view_matrix, 0.1f);
+					camera_z += 0.1f;
+					update_view_matrix(view_matrix);
 					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 				}
 				else if (event.code == 's') {
-					glm_translate_z(view_matrix, -0.1f);
+					camera_z -= 0.1f;
+					update_view_matrix(view_matrix);
 					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 				}
-				else if (event.code == '1') {
-					mode = 1;
+				else if (event.code == 'q') {
+					camera_y += 0.1f;
+					update_view_matrix(view_matrix);
+					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 				}
-				else if (event.code == '2') {
-					mode = 2;
+				else if (event.code == 'e') {
+					camera_y -= 0.1f;
+					update_view_matrix(view_matrix);
+					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 				}
+				else if (event.code == ARROW_LEFT) {
+					camera_yaw -= 10.0f;
+					update_view_matrix(view_matrix);
+					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+				}
+				else if (event.code == ARROW_RIGHT) {
+					camera_yaw += 10.0f;
+					update_view_matrix(view_matrix);
+					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+				}
+				else if (event.code == ARROW_UP) {
+					camera_pitch -= 10.0f;
+					update_view_matrix(view_matrix);
+					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+				}
+				else if (event.code == ARROW_DOWN) {
+					camera_pitch += 10.0f;
+					update_view_matrix(view_matrix);
+					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+				}
+				//else if (event.code == '1') {
+				//	mode = 1;
+				//}
+				//else if (event.code == '2') {
+				//	mode = 2;
+				//}
 			}
 		}
 
 		timer_start(&timer);
 		clear_framebuffer_4i8(&fb, 0, 0, 0, 255);
-		// clear_framebuffer_f(&depth_buffer, far_plane);
-		clear_framebuffer_f(&depth_buffer, 1.0f);
-		rasterize_mesh(attrib, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer, texture, tex_width, tex_height);
+		clear_framebuffer_f(&depth_buffer, far_plane);
+		render_mesh(attrib, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer, texture, tex_width, tex_height);
 		double rasterization_elapsed_ms = timer_elapsed_ms(&timer);
 		total_rasterization_time += rasterization_elapsed_ms;
 
@@ -160,6 +216,7 @@ int main() {
 		double display_elapsed_ms = timer_elapsed_ms(&timer);
 		total_display_time += display_elapsed_ms;
 
+		printf("\x1b[H");    // Move cursor to home
 		printf("\r\n");
 		printf("Rasterization: %0.2f\r\n", rasterization_elapsed_ms);
 		printf("Conversion:    %0.2f\r\n", conversion_elapsed_ms);
@@ -183,10 +240,9 @@ end:
 	tinyobj_shapes_free(shapes, num_shapes);
 	tinyobj_materials_free(materials, num_materials);
 
-	
+
 	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);
 	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_elapsed_ms);
-
 	printf("\x1b[?25h"); // Show cursor
 	fflush(stdout);
 

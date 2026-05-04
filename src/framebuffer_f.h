@@ -15,7 +15,8 @@ framebuffer_f create_framebuffer_f(int width, int height) {
     framebuffer_f fb;
     fb.width = width;
     fb.height = height;
-    fb.data = (float *)malloc(width * height * sizeof(float));
+    // fb.data = (float *)malloc(width * height * sizeof(float));
+    fb.data = (float *)aligned_alloc(32, width * height * sizeof(float)); // 32-byte aligned for AVX
     if (fb.data == NULL) {
         fprintf(stderr, "Failed to allocate memory for framebuffer\n");
         exit(1);
