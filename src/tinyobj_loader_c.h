@@ -215,7 +215,8 @@ static size_t length_until_newline(const char *token, size_t n) {
     if (token[len] == '\n') {
       break;
     }
-    if ((token[len] == '\r') && ((len < (n - 2)) && (token[len + 1] != '\n'))) {
+    //if ((token[len] == '\r') && ((len < (n - 2)) && (token[len + 1] != '\n'))) {
+    if (token[len] == '\r') {
       break;
     }
   }

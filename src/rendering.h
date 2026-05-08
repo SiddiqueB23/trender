@@ -10,7 +10,7 @@
 typedef struct {
 	float position_x, position_y, position_z;
 	float texcoord_u, texcoord_v;
-	float color_r, color_g, color_b;
+	//float color_r, color_g, color_b;
 	float normal_x, normal_y, normal_z;
 } raw_vertex_t;
 
@@ -18,34 +18,33 @@ typedef struct {
 	float homogenous_position_x, homogenous_position_y, homogenous_position_z, homogenous_position_w;
 	float fragment_position_x, fragment_position_y, fragment_position_z;
 	float texcoord_u, texcoord_v;
-	float color_r, color_g, color_b;
 	float normal_x, normal_y, normal_z;
-	float filler;
+	//float color_r, color_g, color_b;
+	//float filler;
 } processed_vertex_t;
 
 typedef struct {
 	processed_vertex_t v0, v1, v2;
 } processed_triangle_t;
 
-void process_fragment(processed_vertex_t interp, unsigned char* texture, int tex_width, int tex_height,
-	unsigned char* r, unsigned char* g, unsigned char* b);
+void process_fragment(processed_vertex_t interp, material_t material, unsigned char* r, unsigned char* g, unsigned char* b);
 /* =========================================================== */
 /*  Vertex Processing                                          */
 /* =========================================================== */
 raw_vertex_t create_vertex(tinyobj_attrib_t attrib, tinyobj_vertex_index_t idx) {
-	raw_vertex_t input = {
-		.position_x = attrib.vertices[3 * idx.v_idx + 0],
-		.position_y = attrib.vertices[3 * idx.v_idx + 1],
-		.position_z = attrib.vertices[3 * idx.v_idx + 2],
-		.texcoord_u = attrib.texcoords[2 * idx.vt_idx + 0],
-		.texcoord_v = attrib.texcoords[2 * idx.vt_idx + 1],
-		.color_r = 0.7f,
-		.color_g = 0.0f,
-		.color_b = 0.0f,
-		.normal_x = attrib.normals[3 * idx.vn_idx + 0],
-		.normal_y = attrib.normals[3 * idx.vn_idx + 1],
-		.normal_z = attrib.normals[3 * idx.vn_idx + 2],
-	};
+	raw_vertex_t input;
+	input.position_x = attrib.vertices[3 * idx.v_idx + 0];
+	input.position_y = attrib.vertices[3 * idx.v_idx + 1];
+	input.position_z = attrib.vertices[3 * idx.v_idx + 2];
+	if (idx.vt_idx > 0) {
+		input.texcoord_u = attrib.texcoords[2 * idx.vt_idx + 0];
+		input.texcoord_v = attrib.texcoords[2 * idx.vt_idx + 1];
+	}
+	if (idx.vn_idx > 0) {
+		input.normal_x = attrib.normals[3 * idx.vn_idx + 0];
+		input.normal_y = attrib.normals[3 * idx.vn_idx + 1];
+		input.normal_z = attrib.normals[3 * idx.vn_idx + 2];
+	}
 	return input;
 }
 
@@ -68,12 +67,12 @@ processed_vertex_t process_vertex(raw_vertex_t input, mat4 model_view_projection
 		.homogenous_position_w = homogenous_position[3],
 		.texcoord_u = input.texcoord_u,
 		.texcoord_v = input.texcoord_v,
-		.color_r = input.color_r,
-		.color_g = input.color_g,
-		.color_b = input.color_b,
 		.normal_x = normal[0],
 		.normal_y = normal[1],
 		.normal_z = normal[2],
+		//.color_r = input.color_r,
+		//.color_g = input.color_g,
+		//.color_b = input.color_b,
 	};
 	return processed_vertex;
 }
@@ -88,7 +87,10 @@ static inline int is_inside_near_plane(processed_vertex_t v) {
 static inline float get_lerp_parameter(processed_vertex_t inside, processed_vertex_t outside) {
 	float d_in = inside.homogenous_position_z + inside.homogenous_position_w;
 	float d_out = outside.homogenous_position_z + outside.homogenous_position_w;
-	return -d_in / (d_out - d_in);
+	float denom = d_out - d_in;
+	if (fabsf(denom) < 1e-6f * fabsf(d_in))
+		return 0.0f; // degenerate: keep inside vertex as-is
+	return glm_clamp(-d_in / denom, 0.0f, 1.0f);
 }
 
 processed_vertex_t lerp_processed_vertex_pair(processed_vertex_t v0, processed_vertex_t v1, float t) {
@@ -97,9 +99,9 @@ processed_vertex_t lerp_processed_vertex_pair(processed_vertex_t v0, processed_v
 	out.homogenous_position_y = v0.homogenous_position_y + t * (v1.homogenous_position_y - v0.homogenous_position_y);
 	out.homogenous_position_z = v0.homogenous_position_z + t * (v1.homogenous_position_z - v0.homogenous_position_z);
 	out.homogenous_position_w = v0.homogenous_position_w + t * (v1.homogenous_position_w - v0.homogenous_position_w);
-	out.color_r = v0.color_r + t * (v1.color_r - v0.color_r);
-	out.color_g = v0.color_g + t * (v1.color_g - v0.color_g);
-	out.color_b = v0.color_b + t * (v1.color_b - v0.color_b);
+	//out.color_r = v0.color_r + t * (v1.color_r - v0.color_r);
+	//out.color_g = v0.color_g + t * (v1.color_g - v0.color_g);
+	//out.color_b = v0.color_b + t * (v1.color_b - v0.color_b);
 	out.texcoord_u = v0.texcoord_u + t * (v1.texcoord_u - v0.texcoord_u);
 	out.texcoord_v = v0.texcoord_v + t * (v1.texcoord_v - v0.texcoord_v);
 	out.fragment_position_x = v0.fragment_position_x + t * (v1.fragment_position_x - v0.fragment_position_x);
@@ -197,10 +199,9 @@ void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processe
 void viewport_transform(processed_vertex_t* v, int width, int height, float* x, float* y) {
 	*x = ((v->homogenous_position_x / v->homogenous_position_w + 1.0f) * 0.5f * (float)width);
 	*y = ((1.0f - (v->homogenous_position_y / v->homogenous_position_w + 1.0f) * 0.5f) * (float)height);
-	//v->homogenous_position_z /= v->homogenous_position_w;
 }
 
-void get_barycentric_coordinates(float v0_x,float v0_y,float v1_x,float v1_y,float v2_x,float v2_y, 
+void get_barycentric_coordinates(float v0_x, float v0_y, float v1_x, float v1_y, float v2_x, float v2_y,
 	float px, float py, float* u, float* v, float* w) {
 	vec2 a = { v0_x, v0_y };
 	vec2 b = { v1_x, v1_y };
@@ -234,7 +235,7 @@ void lerp_projected_attrs(processed_triangle_t triangle, float alpha, float beta
 	float coeff1 = beta / triangle.v1.homogenous_position_w;
 	float coeff2 = gamma / triangle.v2.homogenous_position_w;
 	float coeff3 = out->homogenous_position_w;
-	for (int i = 4;i < 16;i++) {
+	for (int i = 4;i < 12;i++) {
 		out_buf[i] = coeff3 * (coeff0 * v0_buf[i] + coeff1 * v1_buf[i] + coeff2 * v2_buf[i]);
 	}
 	vec3 normal = { out->normal_x, out->normal_y, out->normal_z };
@@ -244,11 +245,14 @@ void lerp_projected_attrs(processed_triangle_t triangle, float alpha, float beta
 	out->normal_z = normal[2];
 }
 
-void rasterize_triangle(framebuffer_4i8* fb, framebuffer_f* depth_buffer, processed_triangle_t triangle, unsigned char* texture, int tex_width, int tex_height) {
+void rasterize_triangle(framebuffer_4i8* fb, framebuffer_f* depth_buffer, processed_triangle_t triangle, material_t material) {
 	float v0_x, v0_y, v1_x, v1_y, v2_x, v2_y;
 	viewport_transform(&triangle.v0, fb->width, fb->height, &v0_x, &v0_y);
 	viewport_transform(&triangle.v1, fb->width, fb->height, &v1_x, &v1_y);
 	viewport_transform(&triangle.v2, fb->width, fb->height, &v2_x, &v2_y);
+
+	float area = (v1_x - v0_x) * (v2_y - v0_y) - (v2_x - v0_x) * (v1_y - v0_y);
+	if (fabsf(area) < 0.1f) return;
 
 	int min_x = (int)(glm_min(glm_min(v0_x, v1_x), v2_x) - 1.0f);
 	int max_x = (int)(glm_max(glm_max(v0_x, v1_x), v2_x) + 1.0f);
@@ -275,8 +279,9 @@ void rasterize_triangle(framebuffer_4i8* fb, framebuffer_f* depth_buffer, proces
 
 			lerp_projected_attrs(triangle, alpha, beta, gamma, &interp);
 
-			unsigned char r = 0, g = 0, b = 0;
-			process_fragment(interp, texture, tex_width, tex_height, &r, &g, &b);
+			unsigned char r = 255, g = 0, b = 0;
+			//if (material.diffuse_texture.data != NULL)
+			process_fragment(interp, material, &r, &g, &b);
 			set_pixel_4i8(fb, x, y, r, g, b, 255);
 
 
@@ -302,30 +307,21 @@ void init_gamma_lut() {
 	}
 }
 
-void sample_texture_nearest(unsigned char* texture, int tex_width, int tex_height, float u, float v, int* r, int* g, int* b) {
+void sample_texture_nearest(unsigned char* texture, int tex_width, int tex_height, float u, float v, unsigned char* r, unsigned char* g, unsigned char* b) {
 	int x = (int)lroundf(u * (float)(tex_width - 1));
 	int y = (int)lroundf((1.0f - v) * (float)(tex_height - 1));
-	x = clamp_int(x, 0, tex_width - 1);
-	y = clamp_int(y, 0, tex_height - 1);
+	//x = clamp_int(x, 0, tex_width - 1);
+	//y = clamp_int(y, 0, tex_height - 1);
+	x = modulo_int(x, tex_width);
+	y = modulo_int(y, tex_height);
 	int index = (y * tex_width + x) * 4;
 	*r = texture[index + 0];
 	*g = texture[index + 1];
 	*b = texture[index + 2];
 }
 
-void process_fragment(processed_vertex_t interp, unsigned char* texture, int tex_width, int tex_height, unsigned char* r, unsigned char* g, unsigned char* b) {
-	vec3 diffuse_color = { interp.color_r, interp.color_g, interp.color_b };
-	vec3 frag_color;
+void blinn_phong(processed_vertex_t interp, vec3 diffuse_color, vec3 frag_color) {
 	vec3 spec_color = { 1.0, 1.0, 1.0 };
-
-	if (texture != NULL) {
-		int texture_r, texture_g, texture_b;
-		sample_texture_nearest(texture, tex_width, tex_height, interp.texcoord_u, interp.texcoord_v, &texture_r, &texture_g, &texture_b);
-		diffuse_color[0] = gamma_lut[texture_r];
-		diffuse_color[1] = gamma_lut[texture_g];
-		diffuse_color[2] = gamma_lut[texture_b];
-	}
-
 	vec3 normal = { interp.normal_x, interp.normal_y, interp.normal_z };
 	vec3 vert_pos = { interp.fragment_position_x, interp.fragment_position_y, interp.fragment_position_z };
 	vec3 light_dir;
@@ -360,21 +356,42 @@ void process_fragment(processed_vertex_t interp, unsigned char* texture, int tex
 	frag_color[0] = powf(color_linear[0], 1.0 / screen_gamma);
 	frag_color[1] = powf(color_linear[1], 1.0 / screen_gamma);
 	frag_color[2] = powf(color_linear[2], 1.0 / screen_gamma);
-
-	//glm_vec3_copy(diffuse_color, frag_color);
-	*r = (unsigned char)clamp_int(lroundf(frag_color[0] * 255.0f), 0, 255);
-	*g = (unsigned char)clamp_int(lroundf(frag_color[1] * 255.0f), 0, 255);
-	*b = (unsigned char)clamp_int(lroundf(frag_color[2] * 255.0f), 0, 255);
 }
 
-void render_mesh(tinyobj_attrib_t attrib, mat4 model_view_projection, mat3 normal_transfrom, mat4 model_view,
-	framebuffer_4i8* fb, framebuffer_f* depth_buffer,
-	unsigned char* texture, int tex_width, int tex_height) {
+void process_fragment(processed_vertex_t interp, material_t material, unsigned char* r, unsigned char* g, unsigned char* b) {
+	vec3 diffuse_color = { material.diffuse[0], material.diffuse[1], material.diffuse[2]};
 
-	for (int i = 0; i < (int)attrib.num_face_num_verts; i++) {
-		raw_vertex_t vert_input0 = create_vertex(attrib, attrib.faces[i * 3 + 0]);
-		raw_vertex_t vert_input1 = create_vertex(attrib, attrib.faces[i * 3 + 1]);
-		raw_vertex_t vert_input2 = create_vertex(attrib, attrib.faces[i * 3 + 2]);
+	//vec3 frag_color;
+	//if (texture != NULL) {
+	//	int texture_r, texture_g, texture_b;
+	//	sample_texture_nearest(texture, tex_width, tex_height, interp.texcoord_u, interp.texcoord_v, &texture_r, &texture_g, &texture_b);
+	//	diffuse_color[0] = gamma_lut[texture_r];
+	//	diffuse_color[1] = gamma_lut[texture_g];
+	//	diffuse_color[2] = gamma_lut[texture_b];
+	//}
+	//blinn_phong(interp, diffuse_color, frag_color);
+	//*r = (unsigned char)clamp_int(lroundf(frag_color[0] * 255.0f), 0, 255);
+	//*g = (unsigned char)clamp_int(lroundf(frag_color[1] * 255.0f), 0, 255);
+	//*b = (unsigned char)clamp_int(lroundf(frag_color[2] * 255.0f), 0, 255);
+
+	if (material.diffuse_texture.data != NULL) {
+		sample_texture_nearest(material.diffuse_texture.data, material.diffuse_texture.width, material.diffuse_texture.height, interp.texcoord_u, interp.texcoord_v, r, g, b);
+	}
+	else {
+		*r = (unsigned char)clamp_int(lroundf(diffuse_color[0] * 255.0f), 0, 255);
+		*g = (unsigned char)clamp_int(lroundf(diffuse_color[1] * 255.0f), 0, 255);
+		*b = (unsigned char)clamp_int(lroundf(diffuse_color[2] * 255.0f), 0, 255);
+	}
+}
+
+void render_mesh(mesh_t* mesh, mat4 model_view_projection, mat3 normal_transfrom, mat4 model_view,
+	framebuffer_4i8* fb, framebuffer_f* depth_buffer) {
+
+	for (int i = 0; i < (int)mesh->attrib.num_face_num_verts; i++) {
+		//for (int i = 13852; i < 13853; i++) {
+		raw_vertex_t vert_input0 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 0]);
+		raw_vertex_t vert_input1 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 1]);
+		raw_vertex_t vert_input2 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 2]);
 
 		processed_vertex_t vert0 = process_vertex(vert_input0, model_view_projection, normal_transfrom, model_view);
 		processed_vertex_t vert1 = process_vertex(vert_input1, model_view_projection, normal_transfrom, model_view);
@@ -385,8 +402,10 @@ void render_mesh(tinyobj_attrib_t attrib, mat4 model_view_projection, mat3 norma
 		int num_clipped_triangles = 0;
 		clip_triangle(triangle, &clipped_triangle0, &clipped_triangle1, &num_clipped_triangles);
 
-		if (num_clipped_triangles > 0) rasterize_triangle(fb, depth_buffer, clipped_triangle0, texture, tex_width, tex_height);
-		if (num_clipped_triangles > 1) rasterize_triangle(fb, depth_buffer, clipped_triangle1, texture, tex_width, tex_height);
+		int mat_idx = mesh->attrib.material_ids[i];
+		
+		if (num_clipped_triangles > 0) rasterize_triangle(fb, depth_buffer, clipped_triangle0, mesh->materials[mat_idx]);
+		if (num_clipped_triangles > 1) rasterize_triangle(fb, depth_buffer, clipped_triangle1, mesh->materials[mat_idx]);
 	}
 }
 #endif

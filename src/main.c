@@ -6,8 +6,6 @@
 #include "timer.h"
 #include "tio.h"
 #include <math.h>
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
 //#define RESOURCES_PATH "../resources/"
 
@@ -30,8 +28,9 @@ void update_model_matrix(mat4 model_matrix) {
 	glm_translate(model_matrix, (vec3) { translate_x, translate_y, translate_z });
 }
 
-float camera_x = 0.0f, camera_y = 2.0f, camera_z = -2.0f;
+float camera_x = 0.0f, camera_y = 2.0f, camera_z = -1.49999988f;
 float camera_pitch = 0.0f, camera_yaw = 0.0f;
+
 void update_view_matrix(mat4 view_matrix) {
 	glm_mat4_identity(view_matrix);
 	glm_rotate_x(view_matrix, glm_rad(camera_pitch), view_matrix);
@@ -39,8 +38,62 @@ void update_view_matrix(mat4 view_matrix) {
 	glm_translate(view_matrix, (vec3) { -camera_x, -camera_y, camera_z });
 }
 
-float near_plane = 0.5f;
-float far_plane = 10.0f;
+void first_person_camera(int event_code,
+	mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix,
+	mat4 model_view, mat4 model_view_projection, mat3 normal_matrix) {
+	float camera_facing_x = sinf(glm_rad(camera_yaw));
+	float camera_facing_y = sinf(glm_rad(camera_pitch));
+	float camera_facing_z = cosf(glm_rad(camera_yaw));
+	float camera_right_x = sinf(glm_rad(camera_yaw - 90.0f));
+	float camera_right_y = 0.0f;
+	float camera_right_z = cosf(glm_rad(camera_yaw - 90.0f));
+
+	if (event_code == 'd') {
+		camera_x -= camera_right_x * 0.1f;
+		camera_y -= camera_right_y * 0.1f;
+		camera_z -= camera_right_z * 0.1f;
+	}
+	else if (event_code == 'a') {
+		camera_x += camera_right_x * 0.1f;
+		camera_y += camera_right_y * 0.1f;
+		camera_z += camera_right_z * 0.1f;
+	}
+	else if (event_code == 'w') {
+		camera_x += camera_facing_x * 0.1f;
+		camera_y += camera_facing_y * 0.1f;
+		camera_z += camera_facing_z * 0.1f;
+	}
+	else if (event_code == 's') {
+		camera_x -= camera_facing_x * 0.1f;
+		camera_y -= camera_facing_y * 0.1f;
+		camera_z -= camera_facing_z * 0.1f;
+	}
+	else if (event_code == 'q') {
+		camera_y += 0.1f;
+	}
+	else if (event_code == 'e') {
+		camera_y -= 0.1f;
+	}
+	else if (event_code == ARROW_LEFT) {
+		camera_yaw -= 10.0f;
+	}
+	else if (event_code == ARROW_RIGHT) {
+		camera_yaw += 10.0f;
+	}
+	else if (event_code == ARROW_UP) {
+		camera_pitch -= 10.0f;
+		glm_clamp(camera_pitch, -45.0f, 45.0f);
+	}
+	else if (event_code == ARROW_DOWN) {
+		camera_pitch += 10.0f;
+		glm_clamp(camera_pitch, -45.0f, 45.0f);
+	}
+	update_view_matrix(view_matrix);
+	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+}
+
+float near_plane = 1.0f;
+float far_plane = 100.0f;
 
 tio_ctx_t ctx;
 
@@ -57,26 +110,15 @@ int main() {
 	printf("\x1b[?25l"); // Hide cursor
 	fflush(stdout);
 
-	const char mesh_path[] = RESOURCES_PATH "Grass_Block.obj";
-	tinyobj_attrib_t attrib;
-	tinyobj_shape_t* shapes = NULL;
-	size_t num_shapes;
-	tinyobj_material_t* materials = NULL;
-	size_t num_materials;
-	int ret = load_mesh(mesh_path, &attrib, &shapes, &num_shapes, &materials, &num_materials);
+	//char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
+	char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
+	mesh_t mesh;
+	int ret = load_obj(obj_path, &mesh);
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s", ret, mesh_path);
+		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s", ret, obj_path);
 		return 1;
 	}
-
-	const char* texture_path = RESOURCES_PATH "Grass_Block_TEX.png";
-	int tex_width, tex_height, tex_channels = 4;
-	unsigned char* texture = NULL;
-	texture = stbi_load(texture_path, &tex_width, &tex_height, &tex_channels, tex_channels);
-	if (texture == NULL) {
-		fprintf(stderr, "Failed to load texture image\nFilepath: %s", texture_path);
-		return 1;
-	}
+	print_material_info(mesh.materials, mesh.num_materials);
 
 	int rows, cols;
 	if (tio_get_window_size(&ctx, &rows, &cols) == -1) {
@@ -119,7 +161,7 @@ int main() {
 	double total_generation_time = 0.0;
 	double total_display_time = 0.0;
 
-	int num_frames = 1000;
+	int num_frames = 100;
 	while (num_frames--) {
 		int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&ctx);
 		int event_bytes_processed = 0;
@@ -131,55 +173,19 @@ int main() {
 				if (event.code == 'Q' || event.code == CTRL_Q) {
 					goto end;
 				}
-				else if (event.code == 'd') {
-					camera_x += 0.1f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == 'a') {
-					camera_x -= 0.1f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == 'w') {
-					camera_z += 0.1f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == 's') {
-					camera_z -= 0.1f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == 'q') {
-					camera_y += 0.1f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == 'e') {
-					camera_y -= 0.1f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == ARROW_LEFT) {
-					camera_yaw -= 10.0f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == ARROW_RIGHT) {
-					camera_yaw += 10.0f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == ARROW_UP) {
-					camera_pitch -= 10.0f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-				}
-				else if (event.code == ARROW_DOWN) {
-					camera_pitch += 10.0f;
-					update_view_matrix(view_matrix);
-					update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+				switch (event.code) {
+				case 'w':
+				case 'a':
+				case 's':
+				case 'd':
+				case 'q':
+				case 'e':
+				case ARROW_UP:
+				case ARROW_DOWN:
+				case ARROW_RIGHT:
+				case ARROW_LEFT:
+					first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+					break;
 				}
 				//else if (event.code == '1') {
 				//	mode = 1;
@@ -193,7 +199,7 @@ int main() {
 		timer_start(&timer);
 		clear_framebuffer_4i8(&fb, 0, 0, 0, 255);
 		clear_framebuffer_f(&depth_buffer, far_plane);
-		render_mesh(attrib, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer, texture, tex_width, tex_height);
+		render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer);
 		double rasterization_elapsed_ms = timer_elapsed_ms(&timer);
 		total_rasterization_time += rasterization_elapsed_ms;
 
@@ -236,9 +242,8 @@ end:
 	fflush(stdout);
 	free_framebuffer_4i8(&fb);
 	free_framebuffer_f(&depth_buffer);
-	tinyobj_attrib_free(&attrib);
-	tinyobj_shapes_free(shapes, num_shapes);
-	tinyobj_materials_free(materials, num_materials);
+	tinyobj_attrib_free(&(mesh.attrib));
+	tinyobj_shapes_free(mesh.shapes, mesh.num_shapes);
 
 
 	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);
