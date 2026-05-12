@@ -568,6 +568,15 @@ int process_mouse_event_record(const MOUSE_EVENT_RECORD* mouseEvent, tio_input_e
 	input_event->type = TIO_INPUT_EVENT_TYPE_MOUSE;
 	input_event->position_x = mouseEvent->dwMousePosition.X;
 	input_event->position_y = mouseEvent->dwMousePosition.Y;
+	//HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+	//CONSOLE_FONT_INFO info;
+	//if (GetCurrentConsoleFont(h, FALSE, &info)) {
+	//	COORD size = GetConsoleFontSize(h, info.nFont);
+	//	if(size.X == 0)input_event->position_x *= size.Y/2 - 1;
+	//	else input_event->position_x *= size.X;
+	//	input_event->position_y *= size.Y;
+	//}
+
 	/* Map some common mouse flags to internal codes */
 	{
         DWORD flags = mouseEvent->dwEventFlags;

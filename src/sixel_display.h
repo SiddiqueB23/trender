@@ -4,6 +4,8 @@
 #include "bayer_patterns.h"
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
+#include "framebuffer_i32.h"
+#include "rainbow.h"
 #include "utils.h"
 #include <stdint.h>
 
@@ -99,7 +101,6 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering(sixel_inde
 	unsigned char divider = 256 / num_steps;
 	const int step_plus_one = num_steps + 1;
 	const int step_plus_one_squared = step_plus_one * step_plus_one;
-	//ivec3 steps_vec = {step_plus_one_squared, step_plus_one, 1};
 
 	for (int y = 0; y < img_y; y++) {
 		unsigned char bayer_y = y % 16;
@@ -108,23 +109,14 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering(sixel_inde
 			int r = image_buffer[y * img_n * img_x + x * img_n + 0];
 			int g = image_buffer[y * img_n * img_x + x * img_n + 1];
 			int b = image_buffer[y * img_n * img_x + x * img_n + 2];
-			//ivec3 color_vec = {r, g, b};
 
 			int t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
 			int corr = (t / num_steps);
-			//glm_ivec3_adds(color_vec, corr, color_vec);
-			//glm_ivec3_divs(color_vec, divider, color_vec);
 			int r_x = (r + corr) / divider;
 			int g_x = (g + corr) / divider;
 			int b_x = (b + corr) / divider;
 
-			//r_x = clamp_int(r_x, 0, num_steps);
-			//g_x = clamp_int(g_x, 0, num_steps);
-			//b_x = clamp_int(b_x, 0, num_steps);
-
 			int color_num = r_x * step_plus_one_squared + g_x * step_plus_one + b_x;
-			//int color_num = glm_ivec3_dot(color_vec, steps_vec);
-			// color_num = 215;
 			bitmap->index_data[y * img_x + x] = color_num;
 		}
 	}
@@ -162,6 +154,41 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(
 }
 
 
+void convert_i32_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_rainbow(sixel_indexed_bitmap* bitmap, framebuffer_i32 fb) {
+	int img_x = fb.width, img_y = fb.height, img_n = 1;
+	const int num_steps = 5;
+	int* image_data_ptr = fb.data;
+	unsigned char divider = 256 / num_steps;
+	const int step_plus_one = num_steps + 1;
+	const int step_plus_one_squared = step_plus_one * step_plus_one;
+	unsigned char* index_data_ptr = bitmap->index_data;
+
+	for (int y = 0;y < img_y;y++) {
+		for (int x = 0;x < img_x;x++) {
+			unsigned char bayer_y = y % 16;
+			unsigned char bayer_x = x % 16;
+			int idx = *(image_data_ptr);
+			unsigned char r = 0;
+			unsigned char g = 0;
+			unsigned char b = 0;
+			if (idx >= 0) {
+				get_rainbow(idx, &r, &g, &b);
+			}
+			image_data_ptr += img_n;
+
+			unsigned char t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
+			unsigned char corr = (t / num_steps);
+			unsigned char r_x = (r + corr) / divider;
+			unsigned char g_x = (g + corr) / divider;
+			unsigned char b_x = (b + corr) / divider;
+
+			unsigned char color_num = r_x * step_plus_one_squared + g_x * step_plus_one + b_x;
+			*index_data_ptr = color_num;
+			index_data_ptr++;
+		}
+	}
+}
+
 void convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_indexed_bitmap* bitmap, framebuffer_f alpha, framebuffer_f beta) {
 	int img_x = alpha.width, img_y = alpha.height;
 	const int num_steps = 5;
@@ -197,6 +224,9 @@ void convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216
 
 				unsigned char color_num = r_x * step_plus_one_squared + g_x * step_plus_one + b_x;
 				*index_data_ptr = color_num;
+			}
+			else {
+				*index_data_ptr = 0;
 			}
 			index_data_ptr++;
 		}

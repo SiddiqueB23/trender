@@ -83,6 +83,57 @@ processed_vertex_t process_vertex(raw_vertex_t input, mat4 model_view_projection
 static inline int is_inside_near_plane(processed_vertex_t v) {
 	return v.homogenous_position_z >= -v.homogenous_position_w;
 }
+static inline int is_inside_far_plane(processed_vertex_t v) {
+	return v.homogenous_position_z <= v.homogenous_position_w;
+}
+static inline int is_inside_down_plane(processed_vertex_t v) {
+	return v.homogenous_position_y >= -v.homogenous_position_w;
+}
+static inline int is_inside_up_plane(processed_vertex_t v) {
+	return v.homogenous_position_y <= v.homogenous_position_w;
+}
+static inline int is_inside_left_plane(processed_vertex_t v) {
+	return v.homogenous_position_x >= -v.homogenous_position_w;
+}
+static inline int is_inside_right_plane(processed_vertex_t v) {
+	return v.homogenous_position_x <= v.homogenous_position_w;
+}
+
+
+static inline int triangle_is_fully_clipped(processed_triangle_t triangle) {
+	int far_plane_check_v0 = is_inside_far_plane(triangle.v0);
+	int far_plane_check_v1 = is_inside_far_plane(triangle.v1);
+	int far_plane_check_v2 = is_inside_far_plane(triangle.v2);
+	int near_plane_check_v0 = is_inside_near_plane(triangle.v0);
+	int near_plane_check_v1 = is_inside_near_plane(triangle.v1);
+	int near_plane_check_v2 = is_inside_near_plane(triangle.v2);
+	int left_plane_check_v0 = is_inside_left_plane(triangle.v0);
+	int left_plane_check_v1 = is_inside_left_plane(triangle.v1);
+	int left_plane_check_v2 = is_inside_left_plane(triangle.v2);
+	int right_plane_check_v0 = is_inside_right_plane(triangle.v0);
+	int right_plane_check_v1 = is_inside_right_plane(triangle.v1);
+	int right_plane_check_v2 = is_inside_right_plane(triangle.v2);
+	int up_plane_check_v0 = is_inside_up_plane(triangle.v0);
+	int up_plane_check_v1 = is_inside_up_plane(triangle.v1);
+	int up_plane_check_v2 = is_inside_up_plane(triangle.v2);
+	int down_plane_check_v0 = is_inside_down_plane(triangle.v0);
+	int down_plane_check_v1 = is_inside_down_plane(triangle.v1);
+	int down_plane_check_v2 = is_inside_down_plane(triangle.v2);
+	if (!(far_plane_check_v0 == far_plane_check_v1 && far_plane_check_v1 == far_plane_check_v2))return 0;
+	if (!(near_plane_check_v0 == near_plane_check_v1 && near_plane_check_v1 == near_plane_check_v2))return 0;
+	if (!(left_plane_check_v0 == left_plane_check_v1 && left_plane_check_v1 == left_plane_check_v2))return 0;
+	if (!(right_plane_check_v0 == right_plane_check_v1 && right_plane_check_v1 == right_plane_check_v2))return 0;
+	if (!(up_plane_check_v0 == up_plane_check_v1 && up_plane_check_v1 == up_plane_check_v2))return 0;
+	if (!(down_plane_check_v0 == down_plane_check_v1 && down_plane_check_v1 == down_plane_check_v2))return 0;
+	int completely_outside_at_least_one_plane =
+		far_plane_check_v0 == 0 ||
+		near_plane_check_v0 == 0 ||
+		left_plane_check_v0 == 0 ||
+		right_plane_check_v0 == 0 ||
+		up_plane_check_v0 == 0 ||
+		down_plane_check_v0 == 0;
+	return completely_outside_at_least_one_plane;
+}
 
 static inline float get_lerp_parameter(processed_vertex_t inside, processed_vertex_t outside) {
 	float d_in = inside.homogenous_position_z + inside.homogenous_position_w;
@@ -121,6 +172,10 @@ processed_vertex_t lerp_processed_vertex_pair(processed_vertex_t v0, processed_v
 void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processed_triangle_t* out2, int* num_out) {
 	*out1 = in;
 	*num_out = 1;
+	if (triangle_is_fully_clipped(in)) {
+		*num_out = 0;
+		return;
+	}
 	int vertex_count = 0;
 	if (is_inside_near_plane(in.v0)) vertex_count++;
 	if (is_inside_near_plane(in.v1)) vertex_count++;
@@ -359,7 +414,7 @@ void blinn_phong(processed_vertex_t interp, vec3 diffuse_color, vec3 frag_color)
 }
 
 void process_fragment(processed_vertex_t interp, material_t material, unsigned char* r, unsigned char* g, unsigned char* b) {
-	vec3 diffuse_color = { material.diffuse[0], material.diffuse[1], material.diffuse[2]};
+	vec3 diffuse_color = { material.diffuse[0], material.diffuse[1], material.diffuse[2] };
 
 	//vec3 frag_color;
 	//if (texture != NULL) {
@@ -403,7 +458,7 @@ void render_mesh(mesh_t* mesh, mat4 model_view_projection, mat3 normal_transfrom
 		clip_triangle(triangle, &clipped_triangle0, &clipped_triangle1, &num_clipped_triangles);
 
 		int mat_idx = mesh->attrib.material_ids[i];
-		
+
 		if (num_clipped_triangles > 0) rasterize_triangle(fb, depth_buffer, clipped_triangle0, mesh->materials[mat_idx]);
 		if (num_clipped_triangles > 1) rasterize_triangle(fb, depth_buffer, clipped_triangle1, mesh->materials[mat_idx]);
 	}

@@ -19,13 +19,7 @@
 #include "utils.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
-typedef struct {
-	unsigned char* data;
-	int width;
-	int height;
-	int channels;
-} texture_t;
+#include "textures.h"
 
 typedef struct {
 	float ambient[3];
@@ -51,6 +45,8 @@ typedef struct {
 	size_t num_shapes;
 	material_t* materials;
 	size_t num_materials;
+	size_t start_triangle_index;
+	size_t end_triangle_index;
 }mesh_t;
 
 static char* mmap_file(size_t* len, const char* filename) {
@@ -214,7 +210,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 				fprintf(stderr, "Failed to load texture image\nFilepath: %s", texture_path);
 				return -1;
 			}
-			printf("Loaded texture image: %s, Material ID: %d\n", texture_path, i);
+			//printf("Loaded texture image: %s, Material ID: %d\n", texture_path, i);
 		}
 		else {
 			loaded_materials[i].diffuse_texture.width = 0;
@@ -232,6 +228,8 @@ int load_obj(char* obj_path, mesh_t* mesh) {
 		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s", ret, obj_path);
 		return 1;
 	}
+	mesh->start_triangle_index = 0;
+	mesh->end_triangle_index = mesh->attrib.num_face_num_verts;
 	mesh->materials = (material_t*)calloc(mesh->num_materials, sizeof(material_t));
 	char texture_dir_path[128];
 	get_dirname(obj_path, texture_dir_path);

@@ -59,7 +59,7 @@ void draw_triangle(framebuffer_4i8* fb, float v0_x, float v0_y, float v1_x, floa
 
 void draw_triangle2(framebuffer_f* alpha, framebuffer_f* beta, float v0_x, float v0_y, float v1_x, float v1_y, float v2_x, float v2_y)
 {
-	const int scale = 16;
+	const int scale = 1;
 	// 28.4 fixed-point coordinates
 	const int Y1 = rintf((float)scale * v0_y);
 	const int Y2 = rintf((float)scale * v1_y);
@@ -92,6 +92,10 @@ void draw_triangle2(framebuffer_f* alpha, framebuffer_f* beta, float v0_x, float
 	int maxx = (max_int(max_int(X1, X2), X3) + (scale - 1)) / scale;
 	int miny = (min_int(min_int(Y1, Y2), Y3) + (scale - 1)) / scale;
 	int maxy = (max_int(max_int(Y1, Y2), Y3) + (scale - 1)) / scale;
+	minx = clamp_int(minx, 0, alpha->width - 1);
+	maxx = clamp_int(maxx, 0, alpha->width - 1);
+	miny = clamp_int(miny, 0, alpha->height - 1);
+	maxy = clamp_int(maxy, 0, alpha->height - 1);
 
 	// Half-edge constants
 	int C1 = DY12 * X1 - DX12 * Y1;
@@ -121,12 +125,17 @@ void draw_triangle2(framebuffer_f* alpha, framebuffer_f* beta, float v0_x, float
 
 		for (int x = minx; x < maxx; x++)
 		{
-			if ((CX1 | CX2 | CX3) > 0)
+			//if (CX3 < 0) {
+			//	*alpha_buffer = 1.0f;
+			//	*beta_buffer = 0.0f;
+			//}
+			//if ((CX1 | CX2 | CX3) > 0)
+			if (((CX1>0) & (CX2>0) & (CX3>0)) | ((CX1<0) & (CX2<0) & (CX3<0)))
 			{
-				float CX1_float = (float)CX1;
 				float CX2_float = (float)CX2;
-				float alpha = CX1_float * inv_denom;
-				float beta = CX2_float * inv_denom;
+				float CX3_float = (float)CX3;
+				float alpha = CX2_float * inv_denom;
+				float beta = CX3_float * inv_denom;
 				*alpha_buffer = alpha;
 				*beta_buffer = beta;
 				//*alpha_buffer = 1.0f;
@@ -406,14 +415,14 @@ void draw_triangle4(framebuffer_f* alpha, framebuffer_f* beta, float v0_x, float
 			// __m256i cmp3 = _mm256_cmpgt_epi32(cx3_vec, zero_vec);
 			// __m256i mask = _mm256_and_si256(_mm256_and_si256(cmp1, cmp2), cmp3);
 			// int mask_int = _mm256_movemask_epi8(mask);
-			
+
 			__m256i combined_signs = _mm256_or_si256(_mm256_or_si256(cx1_vec, cx2_vec), cx3_vec);
 			__m256i mask = _mm256_cmpgt_epi32(combined_signs, zero_vec);
 			int mask_int = _mm256_movemask_epi8(mask);
-			
+
 			if (mask_int != 0) {
-				__m256 alpha_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx1_vec), inv_denom_vec);
-				__m256 beta_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx2_vec), inv_denom_vec);
+				__m256 alpha_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx2_vec), inv_denom_vec);
+				__m256 beta_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx3_vec), inv_denom_vec);
 				if (mask_int == (int)0xFFFFFFFF) {
 					_mm256_store_ps(alpha_buffer, alpha_vec);
 					_mm256_store_ps(beta_buffer, beta_vec);
@@ -453,14 +462,15 @@ int main() {
 	cols = 960;
 	rows = 540;
 	framebuffer_4i8 fb = create_framebuffer_4i8(cols, rows);
-	framebuffer_f alpha = create_framebuffer_f(cols, rows); 
+	framebuffer_f alpha = create_framebuffer_f(cols, rows);
 	framebuffer_f beta = create_framebuffer_f(cols, rows);
-	float v0_x = (float)cols / 2;
-	float v0_y = 10.0f;
-	float v1_x = 10.0f;
-	float v1_y = (float)rows - 10.0f;
-	float v2_x = (float)cols - 10.0f;
-	float v2_y = (float)rows - 10.0f;
+	//float v0_x = (float)cols / 2;
+	//float v0_y = 10.0f;
+	//float v1_x = 10.0f;
+	//float v1_y = (float)rows - 10.0f;
+	//float v2_x = (float)cols - 10.0f;
+	//float v2_y = (float)rows - 10.0f;
+	float v0_x = -16.881523, v0_y = -64.941948, v1_x = 320.140137, v1_y = -64.941948, v2_x = 320.140137, v2_y = 255.625458;
 	sixel_display_ctx sixel_ctx;
 	init_sixel_display_ctx(&sixel_ctx, cols, rows);
 	init_sixel_indexed_bitmap(&sixel_ctx.bitmap, cols, rows);
@@ -479,7 +489,7 @@ int main() {
 	double generation_time = 0.0;
 	double display_time = 0.0;
 
-	int draw_mode = 4;
+	int draw_mode = 2;
 
 	int num_frames = 1000;
 	while (num_frames--) {
@@ -513,7 +523,7 @@ int main() {
 
 
 		for (int i = 0;i < 4;i++) {
-			//clear_framebuffer_4i8(&fb, 0, 0, 0, 255);
+			clear_framebuffer_4i8(&fb, 0, 0, 0, 255);
 			clear_framebuffer_f(&alpha, nanf(""));
 			clear_framebuffer_f(&beta, nanf(""));
 
@@ -527,8 +537,8 @@ int main() {
 		}
 
 		timer_start(&timer);
-		//convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, fb);
-		convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, alpha, beta);
+		if (draw_mode == 1)convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, fb);
+		if (draw_mode == 2 || draw_mode == 4)convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, alpha, beta);
 		conversion_time = timer_elapsed_ms(&timer);
 		total_conversion_time += conversion_time;
 

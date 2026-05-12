@@ -1,11 +1,14 @@
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
 #include "mesh_loading.h"
-#include "rendering.h"
+#include "raycast.h"
+//#include "rendering.h"
+#include "rendering_avx2.h"
 #include "sixel_display.h"
 #include "timer.h"
 #include "tio.h"
 #include <math.h>
+#include <stdlib.h>
 
 //#define RESOURCES_PATH "../resources/"
 
@@ -101,6 +104,24 @@ void cleanup(void) {
 	tio_destroy(&ctx);
 }
 
+int mousex = 0, mousey = 0;
+
+void draw_square(framebuffer_4i8* fb, int x, int y, int width, int screen_width, int screen_height) {
+	for (int i = y;i < y + width && i < screen_height;i++) {
+		for (int j = x;j < x + width && j < screen_width;j++) {
+			set_pixel_4i8(fb, j, i, 255, 0, 0, 255);
+		}
+	}
+}
+
+int compare_uint64_t(const void* a, const void* b) {
+	uint64_t val_a = *(const uint64_t*)a;
+	uint64_t val_b = *(const uint64_t*)b;
+	if (val_a < val_b) return -1;
+	else if (val_a > val_b) return 1;
+	else return 0;
+}
+
 int main() {
 
 	tio_init(&ctx);
@@ -110,30 +131,27 @@ int main() {
 	printf("\x1b[?25l"); // Hide cursor
 	fflush(stdout);
 
-	//char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
-	char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
+	char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
+	//char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
 	mesh_t mesh;
 	int ret = load_obj(obj_path, &mesh);
 	if (ret != 0) {
 		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s", ret, obj_path);
 		return 1;
 	}
-	print_material_info(mesh.materials, mesh.num_materials);
+
+	//print_material_info(mesh.materials, mesh.num_materials);
 
 	int rows, cols;
 	if (tio_get_window_size(&ctx, &rows, &cols) == -1) {
 		fprintf(stderr, "Unable to get window size\n");
 		return 1;
 	}
-	cols = 80;
-	rows = 45;
-	//rows *= 2;
-	//rows -= 2;
-	rows *= 8;
-	cols *= 8;
-	printf("Window size: %d rows, %d cols\n", rows, cols);
-
-	init_gamma_lut();
+	//cols = 80;
+	//rows = 45;
+	//printf("Window size: %d rows, %d cols\n", rows, cols);
+	rows *= 12;
+	cols *= 6;
 
 	mat4 model_matrix, view_matrix, projection_matrix, model_view_projection, model_view;
 	mat3 normal_matrix;
@@ -146,6 +164,7 @@ int main() {
 	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 
 	framebuffer_4i8 fb = create_framebuffer_4i8(cols, rows);
+	framebuffer_i32 ib = create_framebuffer_i32(cols, rows);
 	framebuffer_f depth_buffer = create_framebuffer_f(cols, rows);
 
 	sixel_display_ctx sixel_ctx;
@@ -161,7 +180,9 @@ int main() {
 	double total_generation_time = 0.0;
 	double total_display_time = 0.0;
 
-	int num_frames = 100;
+	int hit_triangle_idx = -1;
+
+	int num_frames = 500;
 	while (num_frames--) {
 		int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&ctx);
 		int event_bytes_processed = 0;
@@ -186,27 +207,53 @@ int main() {
 				case ARROW_LEFT:
 					first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 					break;
+				case '1':
+					use_avx2 = 1;break;
+				case '2':
+					use_avx2 = 0;break;
+				case 'i':
+				case 'I':
+					index_only = !index_only;break;
+				case 't':
+				case 'T':
+					texture_index_only = !texture_index_only;break;
+
 				}
-				//else if (event.code == '1') {
-				//	mode = 1;
-				//}
-				//else if (event.code == '2') {
-				//	mode = 2;
-				//}
+			}
+			else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
+				mousex = 10 * event.position_x + 10;
+				mousey = 20 * event.position_y;
+				mousex = clamp_int(mousex, 0, cols - 1);
+				mousey = clamp_int(mousey, 0, cols - 1);
+				if (event.code == LMB_DOWN) {
+					hit_triangle_idx = ray_cast(&mesh, model_view, mousex, mousey, cols, rows);
+					if (hit_triangle_idx == -1) {
+						mesh.start_triangle_index = 0;
+						mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+					}
+					else {
+						mesh.start_triangle_index = hit_triangle_idx;
+						mesh.end_triangle_index = hit_triangle_idx + 1;
+					}
+				}
 			}
 		}
 
 		timer_start(&timer);
-		clear_framebuffer_4i8(&fb, 0, 0, 0, 255);
+		clear_framebuffer_4i8(&fb, 255, 0, 255, 255);
 		clear_framebuffer_f(&depth_buffer, far_plane);
-		render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer);
+		clear_framebuffer_i32(&ib, -1);
+		render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer, &ib);
 		double rasterization_elapsed_ms = timer_elapsed_ms(&timer);
 		total_rasterization_time += rasterization_elapsed_ms;
 
+		//draw_square(&fb, mousex, mousey, 10, cols, rows);
+
 		timer_start(&timer);
-		//convert_4i8_to_sixel_indexed_bitmap_rgbuniform(&sixel_ctx.bitmap, fb, 5);
-		//convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering(&sixel_ctx.bitmap, fb, 5);
-		convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2(&sixel_ctx.bitmap, fb);
+		if (index_only == 0)
+			convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2(&sixel_ctx.bitmap, fb);
+		else
+			convert_i32_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_rainbow(&sixel_ctx.bitmap, ib);
 		double conversion_elapsed_ms = timer_elapsed_ms(&timer);
 		total_conversion_time += conversion_elapsed_ms;
 
@@ -222,13 +269,19 @@ int main() {
 		double display_elapsed_ms = timer_elapsed_ms(&timer);
 		total_display_time += display_elapsed_ms;
 
+
 		printf("\x1b[H");    // Move cursor to home
 		printf("\r\n");
+		//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
+		//printf("Screen size: %d rows, %d cols, %d pixels\n", rows, cols, rows * cols);
+		//printf("Texture Accesses: %d\r\n", texture_access_count);
+		//printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
 		printf("Rasterization: %0.2f\r\n", rasterization_elapsed_ms);
 		printf("Conversion:    %0.2f\r\n", conversion_elapsed_ms);
 		printf("Generation:    %0.2f\r\n", generation_elapsed_ms);
 		printf("Display:       %0.2f\r\n", display_elapsed_ms);
 		fflush(stdout);
+		texture_access_count = 0;
 	}
 
 end:
