@@ -1,13 +1,16 @@
+#ifndef TEXTURES_H
+#define TEXTURES_H
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 
 typedef struct {
-    unsigned char* data;
+    void* data;
     int width;
     int height;
-    int channels;
+    int color_size;
 } texture_t;
 
 // Spread bits of v apart, inserting a 0 between each bit
@@ -98,9 +101,9 @@ int morton_swizzle(
                     // Source pixel (0 for out-of-bounds — padding)
                     unsigned char pixel[4] = {0, 0, 0, 0};
                     if (src_x < width && src_y < height)
-                        memcpy(pixel, &src.data[(src_y * width + src_x) * 4], 4);
+                        memcpy(pixel, (unsigned char*)src.data + (src_y * width + src_x) * 4, 4);
 
-                    memcpy(&dst->data[(tile_base + morton_off) * 4], pixel, 4);
+                    memcpy((unsigned char*)dst->data + (tile_base + morton_off) * 4, pixel, 4);
                 }
             }
         }
@@ -209,3 +212,39 @@ static inline __m256i morton_index_epi32(
     // Multiply by 4: pixel index -> byte offset (32bpp)
     return _mm256_slli_epi32(index_vec, 2);
 }
+
+uint16_t convert_8r8g8b8a_to_5r6g5b(unsigned char r8, unsigned char g8, unsigned char b8) {
+    uint16_t r5 = (r8 * 31) / 255;
+    uint16_t g6 = (g8 * 63) / 255;
+    uint16_t b5 = (b8 * 31) / 255;
+    return (r5 << 11) | (g6 << 5) | b5;
+}
+
+void convert_8r8g8b8a_to_5r6g5b_texture(texture_t* src) {
+	texture_t dst;
+    dst.width = src->width;
+    dst.height = src->height;
+    dst.color_size = 2; // 16 bits per pixel
+    dst.data = malloc(dst.width * dst.height * dst.color_size);
+    if (!dst.data) return;
+    uint32_t pixel_count = dst.width * dst.height;
+    for (uint32_t i = 0; i < pixel_count; i++) {
+        unsigned char r8 = ((unsigned char*)src->data)[i * 4 + 0];
+        unsigned char g8 = ((unsigned char*)src->data)[i * 4 + 1];
+        unsigned char b8 = ((unsigned char*)src->data)[i * 4 + 2];
+        ((uint16_t*)dst.data)[i] = convert_8r8g8b8a_to_5r6g5b(r8, g8, b8);
+    }
+	free(src->data);
+	*src = dst; // Caller should now use dst as the new texture
+}
+
+void convert_5r6g5b_to_8r8g8b8a(uint16_t src, unsigned char* rgba_out) {
+    uint16_t r5 = (src >> 11) & 0x1F;
+    uint16_t g6 = (src >> 5) & 0x3F;
+    uint16_t b5 = src & 0x1F;
+    rgba_out[0] = (r5 * 255) / 31;
+    rgba_out[1] = (g6 * 255) / 63;
+    rgba_out[2] = (b5 * 255) / 31;
+    rgba_out[3] = 255; // Opaque alpha
+}
+#endif // TEXTURES_H

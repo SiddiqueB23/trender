@@ -1,7 +1,7 @@
 #ifndef RAINBOW_H
 #define RAINBOW_H
 
-void static inline get_rainbow(int index, unsigned char* r, unsigned char* g, unsigned char* b) {
+static inline void get_rainbow(int index, unsigned char* r, unsigned char* g, unsigned char* b) {
 	index = index % (1530);
 	int section = index / 255;
 	int section_offset = index % 255;

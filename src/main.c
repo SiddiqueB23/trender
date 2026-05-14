@@ -1,9 +1,10 @@
+#define NUM_THREADS 4
+
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
 #include "mesh_loading.h"
 #include "raycast.h"
-//#include "rendering.h"
-#include "rendering_avx2.h"
+#include "rendering_avx2_u16_mt.h"
 #include "sixel_display.h"
 #include "timer.h"
 #include "tio.h"
@@ -95,20 +96,17 @@ void first_person_camera(int event_code,
 	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 }
 
-float near_plane = 1.0f;
-float far_plane = 100.0f;
-
-tio_ctx_t ctx;
+tio_ctx_t tio_ctx;
 
 void cleanup(void) {
-	tio_destroy(&ctx);
+	tio_destroy(&tio_ctx);
 }
 
 int mousex = 0, mousey = 0;
 
 void draw_square(framebuffer_4i8* fb, int x, int y, int width, int screen_width, int screen_height) {
-	for (int i = y;i < y + width && i < screen_height;i++) {
-		for (int j = x;j < x + width && j < screen_width;j++) {
+	for (int i = y; i < y + width && i < screen_height; i++) {
+		for (int j = x; j < x + width && j < screen_width; j++) {
 			set_pixel_4i8(fb, j, i, 255, 0, 0, 255);
 		}
 	}
@@ -124,15 +122,15 @@ int compare_uint64_t(const void* a, const void* b) {
 
 int main() {
 
-	tio_init(&ctx);
+	tio_init(&tio_ctx);
 	atexit(cleanup);
 	printf("\x1b[2J");   // Clear screen
 	printf("\x1b[H");    // Move cursor to home
 	printf("\x1b[?25l"); // Hide cursor
 	fflush(stdout);
 
-	char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
-	//char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
+	//char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
+	char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
 	mesh_t mesh;
 	int ret = load_obj(obj_path, &mesh);
 	if (ret != 0) {
@@ -141,17 +139,24 @@ int main() {
 	}
 
 	//print_material_info(mesh.materials, mesh.num_materials);
+	for (int i = 0; i < mesh.num_materials; i++) {
+		if (mesh.materials[i].diffuse_texture.data != NULL)
+			convert_8r8g8b8a_to_5r6g5b_texture(&mesh.materials[i].diffuse_texture);
+	}
 
 	int rows, cols;
-	if (tio_get_window_size(&ctx, &rows, &cols) == -1) {
+	if (tio_get_window_size(&tio_ctx, &rows, &cols) == -1) {
 		fprintf(stderr, "Unable to get window size\n");
 		return 1;
 	}
 	//cols = 80;
 	//rows = 45;
 	//printf("Window size: %d rows, %d cols\n", rows, cols);
-	rows *= 12;
+	rows *= 2;
+	rows *= 6;
 	cols *= 6;
+	rows -= rows % 6;
+	cols -= cols % 8;
 
 	mat4 model_matrix, view_matrix, projection_matrix, model_view_projection, model_view;
 	mat3 normal_matrix;
@@ -163,144 +168,209 @@ int main() {
 	update_view_matrix(view_matrix);
 	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 
-	framebuffer_4i8 fb = create_framebuffer_4i8(cols, rows);
-	framebuffer_i32 ib = create_framebuffer_i32(cols, rows);
-	framebuffer_f depth_buffer = create_framebuffer_f(cols, rows);
+	rendering_ctx_t render_ctx[NUM_THREADS];
+	sixel_display_ctx sixel_ctx[NUM_THREADS];
 
-	sixel_display_ctx sixel_ctx;
-	init_sixel_display_ctx(&sixel_ctx, cols, rows);
-	init_sixel_indexed_bitmap(&sixel_ctx.bitmap, cols, rows);
-	init_sixel_palette_rgbuniform(&sixel_ctx.bitmap.palette, 5);
+	if (NUM_THREADS == 1) {
+		render_ctx[0] = create_rendering_ctx(cols, rows, 0, rows);
+		init_sixel_display_ctx(&sixel_ctx[0], cols, rows);
+		init_sixel_indexed_bitmap(&sixel_ctx[0].bitmap, cols, rows);
+		init_sixel_palette_rgbuniform(&sixel_ctx[0].bitmap.palette, 5);
+	}
+	else {
+		for (int i = 1; i < NUM_THREADS; i++) {
+			int starty, endy;
+			starty = (rows * (i - 1)) / (NUM_THREADS - 1);
+			endy = (rows * ((i - 1) + 1)) / (NUM_THREADS - 1);
+			starty -= starty % 6;
+			endy -= endy % 6;
+			int rows_per_thread = endy - starty;
+			render_ctx[i - 1] = create_rendering_ctx(cols, rows, starty, endy);
+			init_sixel_display_ctx(&sixel_ctx[i - 1], cols, rows_per_thread);
+			init_sixel_indexed_bitmap(&sixel_ctx[i - 1].bitmap, cols, rows_per_thread);
+			init_sixel_palette_rgbuniform(&sixel_ctx[i - 1].bitmap.palette, 5);
+		}
+	}
 
 	monotonic_timer_t timer, timer_whole;
 	timer_start(&timer_whole);
 
-	double total_rasterization_time = 0.0;
+	double total_processing_time = 0.0;
 	double total_conversion_time = 0.0;
-	double total_generation_time = 0.0;
 	double total_display_time = 0.0;
+
+	double processing_time = 0.0;
+	double conversion_time = 0.0;
+	double display_time = 0.0;
+
+	double previous_end_time = timer_elapsed_ms(&timer_whole);
+	double frame_time = 0.0;
+	double total_frame_time = 0.0;
+	double current_end_time = 0.0;
 
 	int hit_triangle_idx = -1;
 
-	int num_frames = 500;
-	while (num_frames--) {
-		int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&ctx);
-		int event_bytes_processed = 0;
-		while (event_bytes_processed < current_event_queue_bytes_size) {
-			tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
-			int bytes_processed = tio_pop_event_queue(&ctx, &event);
-			event_bytes_processed += bytes_processed;
-			if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-				if (event.code == 'Q' || event.code == CTRL_Q) {
-					goto end;
-				}
-				switch (event.code) {
-				case 'w':
-				case 'a':
-				case 's':
-				case 'd':
-				case 'q':
-				case 'e':
-				case ARROW_UP:
-				case ARROW_DOWN:
-				case ARROW_RIGHT:
-				case ARROW_LEFT:
-					first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
-					break;
-				case '1':
-					use_avx2 = 1;break;
-				case '2':
-					use_avx2 = 0;break;
-				case 'i':
-				case 'I':
-					index_only = !index_only;break;
-				case 't':
-				case 'T':
-					texture_index_only = !texture_index_only;break;
-
-				}
-			}
-			else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
-				mousex = 10 * event.position_x + 10;
-				mousey = 20 * event.position_y;
-				mousex = clamp_int(mousex, 0, cols - 1);
-				mousey = clamp_int(mousey, 0, cols - 1);
-				if (event.code == LMB_DOWN) {
-					hit_triangle_idx = ray_cast(&mesh, model_view, mousex, mousey, cols, rows);
-					if (hit_triangle_idx == -1) {
-						mesh.start_triangle_index = 0;
-						mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+#pragma omp parallel num_threads(NUM_THREADS) default(shared)
+	{
+		int thread_id = omp_get_thread_num();
+		int num_frames = 500;
+		int num_frame_counter = num_frames;
+		while (num_frame_counter--) {
+			if (thread_id == 0)
+			{
+				int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
+				int event_bytes_processed = 0;
+				while (event_bytes_processed < current_event_queue_bytes_size) {
+					tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
+					int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
+					event_bytes_processed += bytes_processed;
+					if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
+						if (event.code == 'Q' || event.code == CTRL_Q) {
+							exit(-1);
+						}
+						switch (event.code) {
+						case 'w':
+						case 'a':
+						case 's':
+						case 'd':
+						case 'q':
+						case 'e':
+						case ARROW_UP:
+						case ARROW_DOWN:
+						case ARROW_RIGHT:
+						case ARROW_LEFT:
+							first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
+							break;
+						}
 					}
-					else {
-						mesh.start_triangle_index = hit_triangle_idx;
-						mesh.end_triangle_index = hit_triangle_idx + 1;
+					else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
+						mousex = 10 * event.position_x;
+						mousey = 20 * event.position_y;
+						mousex = clamp_int(mousex, 0, cols - 1);
+						mousey = clamp_int(mousey, 0, cols - 1);
+						if (event.code == LMB_DOWN) {
+							hit_triangle_idx = ray_cast(&mesh, model_view, mousex, mousey, cols, rows);
+							if (hit_triangle_idx == -1) {
+								mesh.start_triangle_index = 0;
+								mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+							}
+							else {
+								mesh.start_triangle_index = hit_triangle_idx;
+								mesh.end_triangle_index = hit_triangle_idx + 1;
+							}
+						}
 					}
 				}
 			}
+			if (thread_id >= 1 || NUM_THREADS == 1) {
+				if (NUM_THREADS == 1) {
+					render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[0]);
+				}
+				else {
+					render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[thread_id - 1]);
+				}
+			}
+#pragma omp barrier
+			if (thread_id == 0) {
+				timer_start(&timer);
+			}
+			if (thread_id >= 1) {
+				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx[thread_id - 1].bitmap, render_ctx[thread_id - 1].output_buffer);
+				generate_sixel_display_data(&sixel_ctx[thread_id - 1]);
+			}
+			if (NUM_THREADS == 1) {
+				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx[0].bitmap, render_ctx[0].output_buffer);
+				generate_sixel_display_data(&sixel_ctx[0]);
+			}
+#pragma omp barrier
+			if (thread_id == 0) {
+				conversion_time = timer_elapsed_ms(&timer);
+				timer_start(&timer);
+				int footer_len = 3;
+				if (NUM_THREADS <= 2) {
+					if (tio_write(&tio_ctx, sixel_ctx[0].data, sixel_ctx[0].data_size) == -1) {
+						exit(-1);
+					}
+				}
+				else {
+					if (tio_write(&tio_ctx, sixel_ctx[0].data, sixel_ctx[0].data_size - footer_len) == -1) {
+						exit(-1);
+					}
+					for (int i = 1; i < NUM_THREADS - 2; i++) {
+						if (tio_write(&tio_ctx, sixel_ctx[i].sixel_data, sixel_ctx[i].data_size - sixel_ctx[i].header_data_size - footer_len) == -1) {
+							exit(-1);
+						}
+					}
+				}
+				if (NUM_THREADS >= 3) {
+					if (tio_write(&tio_ctx,
+						sixel_ctx[NUM_THREADS - 2].data + sixel_ctx[NUM_THREADS - 2].header_data_size,
+						sixel_ctx[NUM_THREADS - 2].data_size - sixel_ctx[NUM_THREADS - 2].header_data_size) == -1) {
+						exit(-1);
+					}
+				}
+				display_time = timer_elapsed_ms(&timer);
+				total_display_time += display_time;
+
+				current_end_time = timer_elapsed_ms(&timer_whole);
+				frame_time = current_end_time - previous_end_time;
+				previous_end_time = current_end_time;
+				total_frame_time += frame_time;
+
+				processing_time = fmaxf(0.0f, frame_time - display_time);
+				total_processing_time += processing_time;
+
+				printf("\x1b[H");    // Move cursor to home
+				printf("\r\n");
+				//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
+				printf("Screen size: %d rows, %d cols, %d pixels\n", rows, cols, rows * cols);
+				//printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
+				printf("Processing:    %0.2f\r\n", processing_time);
+				printf("Conversion:    %0.2f\r\n", conversion_time);
+				printf("Display:       %0.2f\r\n", display_time);
+				printf("Frame time:    %0.2f\r\n", frame_time);
+				fflush(stdout);
+			}
 		}
 
-		timer_start(&timer);
-		clear_framebuffer_4i8(&fb, 255, 0, 255, 255);
-		clear_framebuffer_f(&depth_buffer, far_plane);
-		clear_framebuffer_i32(&ib, -1);
-		render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &fb, &depth_buffer, &ib);
-		double rasterization_elapsed_ms = timer_elapsed_ms(&timer);
-		total_rasterization_time += rasterization_elapsed_ms;
-
-		//draw_square(&fb, mousex, mousey, 10, cols, rows);
-
-		timer_start(&timer);
-		if (index_only == 0)
-			convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2(&sixel_ctx.bitmap, fb);
-		else
-			convert_i32_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_rainbow(&sixel_ctx.bitmap, ib);
-		double conversion_elapsed_ms = timer_elapsed_ms(&timer);
-		total_conversion_time += conversion_elapsed_ms;
-
-		timer_start(&timer);
-		generate_sixel_display_data(&sixel_ctx);
-		double generation_elapsed_ms = timer_elapsed_ms(&timer);
-		total_generation_time += generation_elapsed_ms;
-
-		timer_start(&timer);
-		if (tio_write(&ctx, sixel_ctx.data, sixel_ctx.data_size) == -1) {
-			goto end;
+		//end:
+		if (thread_id == 0) {
+			printf("\r\n");
+			printf("Total times:\r\n");
+			printf("Processing:    %0.2f\r\n", total_processing_time);
+			printf("Display:       %0.2f\r\n", total_display_time);
+			printf("Conversion:    %0.2f\r\n", total_conversion_time);
+			printf("Frame time:    %0.2f\r\n", total_frame_time);
+			printf("Average times:\r\n");
+			printf("Processing:    %0.2f\r\n", total_processing_time / (float)num_frames);
+			printf("Display:       %0.2f\r\n", total_display_time / (float)num_frames);
+			printf("Conversion:    %0.2f\r\n", total_conversion_time / (float)num_frames);
+			printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
 		}
-		double display_elapsed_ms = timer_elapsed_ms(&timer);
-		total_display_time += display_elapsed_ms;
-
-
-		printf("\x1b[H");    // Move cursor to home
-		printf("\r\n");
-		//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
-		//printf("Screen size: %d rows, %d cols, %d pixels\n", rows, cols, rows * cols);
-		//printf("Texture Accesses: %d\r\n", texture_access_count);
-		//printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
-		printf("Rasterization: %0.2f\r\n", rasterization_elapsed_ms);
-		printf("Conversion:    %0.2f\r\n", conversion_elapsed_ms);
-		printf("Generation:    %0.2f\r\n", generation_elapsed_ms);
-		printf("Display:       %0.2f\r\n", display_elapsed_ms);
-		fflush(stdout);
-		texture_access_count = 0;
 	}
 
-end:
+#pragma omp barrier
+	double total_clear_time = render_ctx[0].total_clear_time;
+	double total_rasterisation_time = render_ctx[0].total_rasterisation_time;
+	double total_texture_sampling_time = render_ctx[0].total_texture_sampling_time;
 
-	printf("\r\n");
-	printf("Total times:\r\n");
-	printf("Rasterization: %0.2f\r\n", total_rasterization_time);
-	printf("Conversion:    %0.2f\r\n", total_conversion_time);
-	printf("Generation:    %0.2f\r\n", total_generation_time);
-	printf("Display:       %0.2f\r\n", total_display_time);
+	for (int i = 1; i < NUM_THREADS - 1; i++) {
+		total_clear_time += render_ctx[i].total_clear_time;
+		total_rasterisation_time += render_ctx[i].total_rasterisation_time;
+		total_texture_sampling_time += render_ctx[i].total_texture_sampling_time;
+	}
+
+	printf("total_clear_time:            %0.2f\r\n", total_clear_time);
+	printf("total_rasterisation_time:    %0.2f\r\n", total_rasterisation_time);
+	printf("total_texture_sampling_time: %0.2f\r\n", total_texture_sampling_time);
+
 	fflush(stdout);
-	free_framebuffer_4i8(&fb);
-	free_framebuffer_f(&depth_buffer);
 	tinyobj_attrib_free(&(mesh.attrib));
 	tinyobj_shapes_free(mesh.shapes, mesh.num_shapes);
 
 
-	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);
-	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_elapsed_ms);
+	double whole_time = timer_elapsed_ms(&timer_whole);
+	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_time);
 	printf("\x1b[?25h"); // Show cursor
 	fflush(stdout);
 

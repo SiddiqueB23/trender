@@ -22,14 +22,14 @@
 #include "textures.h"
 
 typedef struct {
-	float ambient[3];
 	float diffuse[3];
-	float specular[3];
-	float transmittance[3];
-	float emission[3];
-	float shininess;
-	float ior;      /* index of refraction */
-	float dissolve; /* 1 == opaque; 0 == fully transparent */
+	//float ambient[3];
+	//float specular[3];
+	//float transmittance[3];
+	//float emission[3];
+	//float shininess;
+	//float ior;      /* index of refraction */
+	//float dissolve; /* 1 == opaque; 0 == fully transparent */
 	texture_t diffuse_texture;            /* map_Kd */
 	//char* ambient_texname;            /* map_Ka */
 	//char* specular_texname;           /* map_Ks */
@@ -184,18 +184,18 @@ void print_material_info(material_t* materials, size_t num_materials) {
 
 int load_materials(tinyobj_material_t* materials, size_t num_materials, material_t* loaded_materials, char* texture_dir_path) {
 	for (int i = 0;i < (int)num_materials;i++) {
-		loaded_materials[i].ambient[0] = materials[i].ambient[0];
-		loaded_materials[i].ambient[1] = materials[i].ambient[1];
-		loaded_materials[i].ambient[2] = materials[i].ambient[2];
 		loaded_materials[i].diffuse[0] = materials[i].diffuse[0];
 		loaded_materials[i].diffuse[1] = materials[i].diffuse[1];
 		loaded_materials[i].diffuse[2] = materials[i].diffuse[2];
-		loaded_materials[i].specular[0] = materials[i].specular[0];
-		loaded_materials[i].specular[1] = materials[i].specular[1];
-		loaded_materials[i].specular[2] = materials[i].specular[2];
-		loaded_materials[i].transmittance[0] = materials[i].transmittance[0];
-		loaded_materials[i].transmittance[1] = materials[i].transmittance[1];
-		loaded_materials[i].transmittance[2] = materials[i].transmittance[2];
+		//loaded_materials[i].ambient[0] = materials[i].ambient[0];
+		//loaded_materials[i].ambient[1] = materials[i].ambient[1];
+		//loaded_materials[i].ambient[2] = materials[i].ambient[2];
+		//loaded_materials[i].specular[0] = materials[i].specular[0];
+		//loaded_materials[i].specular[1] = materials[i].specular[1];
+		//loaded_materials[i].specular[2] = materials[i].specular[2];
+		//loaded_materials[i].transmittance[0] = materials[i].transmittance[0];
+		//loaded_materials[i].transmittance[1] = materials[i].transmittance[1];
+		//loaded_materials[i].transmittance[2] = materials[i].transmittance[2];
 
 		loaded_materials[i].diffuse_texture.data = NULL;
 		if (materials[i].diffuse_texname != NULL) {
@@ -205,7 +205,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 			loaded_materials[i].diffuse_texture.data = stbi_load(texture_path, 
 				&(loaded_materials[i].diffuse_texture.width), 
 				&(loaded_materials[i].diffuse_texture.height), 
-				&(loaded_materials[i].diffuse_texture.channels), 4);
+				&(loaded_materials[i].diffuse_texture.color_size), 4);
 			if (loaded_materials[i].diffuse_texture.data == NULL) {
 				fprintf(stderr, "Failed to load texture image\nFilepath: %s", texture_path);
 				return -1;
@@ -215,7 +215,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 		else {
 			loaded_materials[i].diffuse_texture.width = 0;
 			loaded_materials[i].diffuse_texture.height = 0;
-			loaded_materials[i].diffuse_texture.channels = 0;
+			loaded_materials[i].diffuse_texture.color_size = 0;
 		}
 	}
 	return 0;

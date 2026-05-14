@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Force GCC compiler
-set(CMAKE_C_COMPILER gcc)
+# set(CMAKE_C_COMPILER gcc)
 
 project(trender C)
 
@@ -10,17 +10,18 @@ set(CMAKE_C_STANDARD 11)
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
 add_compile_definitions(RESOURCES_PATH="${CMAKE_SOURCE_DIR}/resources/")
-
+ 
 # Platform-specific compiler flags
 if(MSVC)
   # keep optimizations, but generate PDB and ask linker to emit debug info
-  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /Qvec-report:2 /Qpar /Qpar-report:2 /arch:AVX2 /openmp")
-  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /Qvec-report:2 /Qpar /Qpar-report:2 /arch:AVX2 /openmp")
-  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
-  set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG")
+  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /Qvec-report:2 /arch:AVX2 /openmp:experimental")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /Qvec-report:2 /arch:AVX2 /openmp:experimental")
+  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /openmp:experimental")
+  set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG /openmp:experimental")
 else()
   # GCC/Clang
   add_compile_options(-Wall -Wextra -pedantic -O3 -g -march=native -mtune=native)
+  add_compile_options(-fopenmp)
   
   # Native optimization only for native builds (not cross-compiling)
   if(NOT CMAKE_CROSSCOMPILING)
@@ -64,6 +65,13 @@ if(UNIX)
   target_link_libraries(triangle_drawing_test PRIVATE m rt)
 else()
   target_link_libraries(triangle_drawing_test PRIVATE)
+endif()
+
+add_executable(omp_test ${CMAKE_SOURCE_DIR}/src/omp_test.c)
+if(UNIX)
+  target_link_libraries(omp_test PRIVATE m rt)
+else()
+  target_link_libraries(omp_test PRIVATE)
 endif()
 
 # Generate assembly for main.c (only on GCC/Clang, not cross-compiling)

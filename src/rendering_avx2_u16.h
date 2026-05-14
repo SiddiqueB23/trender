@@ -25,6 +25,9 @@ typedef struct {
 
 typedef struct {
 	processed_vertex_t v0, v1, v2;
+	int material_id;
+	int tex_width;
+	int tex_height;
 } processed_triangle_t;
 
 /* =========================================================== */
@@ -57,6 +60,19 @@ processed_vertex_t process_vertex(raw_vertex_t input, mat4 model_view_projection
 	return processed_vertex;
 }
 
+processed_vertex_t process_vertex_2(vec4* ndc_arr, tinyobj_attrib_t attrib, tinyobj_vertex_index_t idx) {
+	processed_vertex_t processed_vertex = {
+		.homogenous_position_x = ndc_arr[idx.v_idx][0],
+		.homogenous_position_y = ndc_arr[idx.v_idx][1],
+		.homogenous_position_z = ndc_arr[idx.v_idx][2],
+		.homogenous_position_w = ndc_arr[idx.v_idx][3],
+		.texcoord_u = attrib.texcoords[2 * idx.vt_idx + 0],
+		.texcoord_v = attrib.texcoords[2 * idx.vt_idx + 1],
+	};
+	return processed_vertex;
+}
+
+
 /* =========================================================== */
 /*  Triangle Clipping                                          */
 /* =========================================================== */
@@ -78,7 +94,6 @@ static inline int is_inside_left_plane(processed_vertex_t v) {
 static inline int is_inside_right_plane(processed_vertex_t v) {
 	return v.homogenous_position_x <= v.homogenous_position_w;
 }
-
 
 static inline int triangle_is_fully_clipped(processed_triangle_t triangle) {
 	int far_plane_check_v0 = is_inside_far_plane(triangle.v0);
@@ -230,6 +245,30 @@ void viewport_transform(processed_vertex_t* v, int width, int height, float* x, 
 	*y = ((1.0f - (v->homogenous_position_y / v->homogenous_position_w + 1.0f) * 0.5f) * (float)height);
 }
 
+float get_processed_triangle_area(processed_triangle_t triangle, int width, int height) {
+	float x0, y0, x1, y1, x2, y2;
+	viewport_transform(&triangle.v0, width, height, &x0, &y0);
+	viewport_transform(&triangle.v1, width, height, &x1, &y1);
+	viewport_transform(&triangle.v2, width, height, &x2, &y2);
+	return 0.5f * fabsf(x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1));
+}
+
+//static inline __m256i _mm256_rem_epi32(__m256i a, __m256i b) {
+//	// Convert int32 → float (exact for values within float's 24-bit mantissa)
+//	__m256 fa = _mm256_cvtepi32_ps(a);
+//	__m256 fb = _mm256_cvtepi32_ps(b);
+//
+//	// Divide and truncate toward zero (matches C integer division semantics)
+//	__m256 quotient = _mm256_div_ps(fa, fb);
+//	__m256 truncated = _mm256_round_ps(quotient, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+//
+//	// remainder = a - trunc(a/b) * b
+//	__m256 prod = _mm256_mul_ps(truncated, fb);
+//	__m256 rem_f = _mm256_sub_ps(fa, prod);
+//
+//	return _mm256_cvttps_epi32(rem_f);
+//}
+
 static inline __m256i modulo_int_avx2(__m256i x, int modulus) {
 	__m256i mod = _mm256_set1_epi32(modulus);
 	__m256i result = _mm256_rem_epi32(x, mod);
@@ -242,7 +281,12 @@ static inline __m256 dot_product_3vec8f(__m256 a0, __m256 a1, __m256 a2, __m256 
 	return _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(a0, b0), _mm256_mul_ps(a1, b1)), _mm256_mul_ps(a2, b2));
 }
 
-void rasterize_triangle_avx2(framebuffer_4i8* fb, framebuffer_f* depth_buffer, processed_triangle_t triangle, material_t material) {
+void rasterize_triangle_avx2_texture_index_only(framebuffer_i32* fb, framebuffer_f* depth_buffer, processed_triangle_t triangle) {
+
+	int mat_idx = triangle.material_id;
+	int tex_width = triangle.tex_width;
+	int tex_height = triangle.tex_height;
+	int is_textured = (tex_width != 0 && tex_height != 0);
 
 	float v0_x, v0_y, v1_x, v1_y, v2_x, v2_y;
 	viewport_transform(&triangle.v0, fb->width, fb->height, &v0_x, &v0_y);
@@ -301,214 +345,7 @@ void rasterize_triangle_avx2(framebuffer_4i8* fb, framebuffer_f* depth_buffer, p
 	float inv_denom = 1.0f / ((float)C1 + (float)C2 + (float)C3);
 
 	int CY1[8], CY2[8], CY3[8];
-	for (int i = 0;i < 8;i++) {
-		CY1[i] = C1 + FDX12 * (miny + 0) - FDY12 * (minx + i);
-		CY2[i] = C2 + FDX23 * (miny + 0) - FDY23 * (minx + i);
-		CY3[i] = C3 + FDX31 * (miny + 0) - FDY31 * (minx + i);
-	}
-
-	float* depth_buffer_ptr = depth_buffer->data;
-
-	__m256i cy1_vec = _mm256_loadu_si256((__m256i*)CY1);
-	__m256i cy2_vec = _mm256_loadu_si256((__m256i*)CY2);
-	__m256i cy3_vec = _mm256_loadu_si256((__m256i*)CY3);
-
-	const __m256i fdx12_vec = _mm256_set1_epi32(FDX12 * 1);
-	const __m256i fdx23_vec = _mm256_set1_epi32(FDX23 * 1);
-	const __m256i fdx31_vec = _mm256_set1_epi32(FDX31 * 1);
-
-	const __m256i eight_fdy12_vec = _mm256_set1_epi32(FDY12 * 8);
-	const __m256i eight_fdy23_vec = _mm256_set1_epi32(FDY23 * 8);
-	const __m256i eight_fdy31_vec = _mm256_set1_epi32(FDY31 * 8);
-
-	const __m256i zero_vec = _mm256_setzero_si256();
-
-	const __m256 v0w_inv_vec = _mm256_set1_ps(1.0f / triangle.v0.homogenous_position_w);
-	const __m256 v1w_inv_vec = _mm256_set1_ps(1.0f / triangle.v1.homogenous_position_w);
-	const __m256 v2w_inv_vec = _mm256_set1_ps(1.0f / triangle.v2.homogenous_position_w);
-
-	int area = C1 + C2 + C3;
-	float inv_area = 1.0f / (float)area;
-	const __m256 inv_area_vec = _mm256_set1_ps(inv_area);
-
-	if (area < scale && area > -scale) return; // Degenerate triangle, skip
-
-	vec3 diffuse_color = { material.diffuse[0], material.diffuse[1], material.diffuse[2] };
-	unsigned char r = (unsigned char)clamp_int(lroundf(diffuse_color[0] * 255.0f), 0, 255);
-	unsigned char g = (unsigned char)clamp_int(lroundf(diffuse_color[1] * 255.0f), 0, 255);
-	unsigned char b = (unsigned char)clamp_int(lroundf(diffuse_color[2] * 255.0f), 0, 255);
-
-	unsigned char* color_buffer = fb->data;
-
-	const __m256 v0u_vec = _mm256_set1_ps(triangle.v0.texcoord_u);
-	const __m256 v1u_vec = _mm256_set1_ps(triangle.v1.texcoord_u);
-	const __m256 v2u_vec = _mm256_set1_ps(triangle.v2.texcoord_u);
-	const __m256 v0v_vec = _mm256_set1_ps(triangle.v0.texcoord_v);
-	const __m256 v1v_vec = _mm256_set1_ps(triangle.v1.texcoord_v);
-	const __m256 v2v_vec = _mm256_set1_ps(triangle.v2.texcoord_v);
-
-
-	__m256i diffuse_color_vec = _mm256_set_epi8(
-		255, b, g, r, 255, b, g, r, 255, b, g, r, 255, b, g, r,
-		255, b, g, r, 255, b, g, r, 255, b, g, r, 255, b, g, r
-	);
-
-	for (int y = miny; y < maxy; y += 1)
-	{
-		color_buffer = fb->data + (y * fb->width * 4 + minx * 4);
-		depth_buffer_ptr = depth_buffer->data + (y * depth_buffer->width + minx);
-
-		__m256i cx1_vec = cy1_vec;
-		__m256i cx2_vec = cy2_vec;
-		__m256i cx3_vec = cy3_vec;
-		for (int x = minx; x < maxx; x += 8) {
-			__m256i cmp1 = _mm256_cmpgt_epi32(cx1_vec, zero_vec);
-			__m256i cmp2 = _mm256_cmpgt_epi32(cx2_vec, zero_vec);
-			__m256i cmp3 = _mm256_cmpgt_epi32(cx3_vec, zero_vec);
-			__m256i positive_mask = _mm256_and_si256(_mm256_and_si256(cmp1, cmp2), cmp3);
-			__m256i negative_mask = _mm256_xor_si256(_mm256_or_si256(_mm256_or_si256(cmp1, cmp2), cmp3), _mm256_set1_epi32(-1));
-			__m256i inside_mask = _mm256_or_si256(positive_mask, negative_mask);
-
-			int inside_mask_int = _mm256_movemask_epi8(inside_mask);
-			if (inside_mask_int == 0) {
-				cx1_vec = _mm256_sub_epi32(cx1_vec, eight_fdy12_vec);
-				cx2_vec = _mm256_sub_epi32(cx2_vec, eight_fdy23_vec);
-				cx3_vec = _mm256_sub_epi32(cx3_vec, eight_fdy31_vec);
-				color_buffer += 32;
-				depth_buffer_ptr += 8;
-				continue;
-			}
-
-			__m256 alpha_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx2_vec), inv_area_vec);
-			__m256 beta_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx3_vec), inv_area_vec);
-			__m256 gamma_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx1_vec), inv_area_vec);
-
-			__m256 w_interp_vec = _mm256_rcp_ps(dot_product_3vec8f(alpha_vec, beta_vec, gamma_vec, v0w_inv_vec, v1w_inv_vec, v2w_inv_vec));
-			__m256 current_depth_vec = _mm256_load_ps(depth_buffer_ptr);
-			__m256i depth_mask = _mm256_castps_si256(_mm256_cmp_ps(w_interp_vec, current_depth_vec, _CMP_LT_OQ));
-
-			__m256i mask = _mm256_and_si256(depth_mask, inside_mask);
-			int mask_int = _mm256_movemask_epi8(mask);
-
-			__m256 coeff0_vec = _mm256_mul_ps(alpha_vec, v0w_inv_vec);
-			__m256 coeff1_vec = _mm256_mul_ps(beta_vec, v1w_inv_vec);
-			__m256 coeff2_vec = _mm256_mul_ps(gamma_vec, v2w_inv_vec);
-			__m256 interp_u = _mm256_mul_ps(
-				dot_product_3vec8f(coeff0_vec, coeff1_vec, coeff2_vec, v0u_vec, v1u_vec, v2u_vec),
-				w_interp_vec
-			);
-			__m256 interp_v = _mm256_mul_ps(
-				dot_product_3vec8f(coeff0_vec, coeff1_vec, coeff2_vec, v0v_vec, v1v_vec, v2v_vec),
-				w_interp_vec
-			);
-
-			if (mask_int != 0) {
-				if (material.diffuse_texture.data != NULL) {
-					unsigned char texture_color[8][4];
-					__m256 one_minus_interp_v = _mm256_sub_ps(_mm256_set1_ps(1.0f), interp_v);
-					__m256i tex_x = _mm256_cvtps_epi32(_mm256_mul_ps(interp_u, _mm256_set1_ps((float)(material.diffuse_texture.width - 1))));
-					__m256i tex_y = _mm256_cvtps_epi32(_mm256_mul_ps(one_minus_interp_v, _mm256_set1_ps((float)(material.diffuse_texture.height - 1))));
-					__m256i tex_width_vec = _mm256_set1_epi32(material.diffuse_texture.width);
-					tex_x = modulo_int_avx2(tex_x, material.diffuse_texture.width);
-					tex_y = modulo_int_avx2(tex_y, material.diffuse_texture.height);
-
-					__m256i index_vec = _mm256_add_epi32(_mm256_mullo_epi32(tex_y, tex_width_vec), tex_x);
-					index_vec = _mm256_mullo_epi32(index_vec, _mm256_set1_epi32(4));
-					int index_array[8];
-					_mm256_storeu_si256((__m256i*)index_array, index_vec);
-					for (int i = 0;i < 8;i++) {
-						if (mask_int & (1 << (i * 4))) {
-							memcpy(&texture_color[i], (unsigned char*)material.diffuse_texture.data + index_array[i], 4);
-						}
-					}
-
-					diffuse_color_vec = _mm256_loadu_si256((__m256i*)texture_color);
-				}
-				if (mask_int == (int)0xFFFFFFFF) {
-					_mm256_store_si256((__m256i*)color_buffer, diffuse_color_vec);
-					_mm256_store_ps(depth_buffer_ptr, w_interp_vec);
-				}
-				else {
-					_mm256_maskstore_epi32((int*)color_buffer, mask, diffuse_color_vec);
-					_mm256_maskstore_ps(depth_buffer_ptr, mask, w_interp_vec);
-				}
-			}
-
-			color_buffer += 32;
-			depth_buffer_ptr += 8;
-
-			cx1_vec = _mm256_sub_epi32(cx1_vec, eight_fdy12_vec);
-			cx2_vec = _mm256_sub_epi32(cx2_vec, eight_fdy23_vec);
-			cx3_vec = _mm256_sub_epi32(cx3_vec, eight_fdy31_vec);
-		}
-		cy1_vec = _mm256_add_epi32(cy1_vec, fdx12_vec);
-		cy2_vec = _mm256_add_epi32(cy2_vec, fdx23_vec);
-		cy3_vec = _mm256_add_epi32(cy3_vec, fdx31_vec);
-	}
-
-}
-
-void rasterize_triangle_avx2_texture_index_only(framebuffer_i32* fb, framebuffer_f* depth_buffer, processed_triangle_t triangle,
-	int mat_idx, int tex_width, int tex_height, int is_textured) {
-
-	float v0_x, v0_y, v1_x, v1_y, v2_x, v2_y;
-	viewport_transform(&triangle.v0, fb->width, fb->height, &v0_x, &v0_y);
-	viewport_transform(&triangle.v1, fb->width, fb->height, &v1_x, &v1_y);
-	viewport_transform(&triangle.v2, fb->width, fb->height, &v2_x, &v2_y);
-
-	// 28.4 fixed-point coordinates
-	const int Y1 = rintf((float)scale * v0_y);
-	const int Y2 = rintf((float)scale * v1_y);
-	const int Y3 = rintf((float)scale * v2_y);
-
-	const int X1 = rintf((float)scale * v0_x);
-	const int X2 = rintf((float)scale * v1_x);
-	const int X3 = rintf((float)scale * v2_x);
-
-	// Deltas
-	const int DX12 = X1 - X2;
-	const int DX23 = X2 - X3;
-	const int DX31 = X3 - X1;
-
-	const int DY12 = Y1 - Y2;
-	const int DY23 = Y2 - Y3;
-	const int DY31 = Y3 - Y1;
-
-	// Fixed-point deltas
-	const int FDX12 = DX12 * scale;
-	const int FDX23 = DX23 * scale;
-	const int FDX31 = DX31 * scale;
-
-	const int FDY12 = DY12 * scale;
-	const int FDY23 = DY23 * scale;
-	const int FDY31 = DY31 * scale;
-
-	// Bounding rectangle
-	int minx = (min_int(min_int(X1, X2), X3) + (scale - 1)) / scale;
-	int maxx = (max_int(max_int(X1, X2), X3) + (scale - 1)) / scale;
-	int miny = (min_int(min_int(Y1, Y2), Y3) + (scale - 1)) / scale;
-	int maxy = (max_int(max_int(Y1, Y2), Y3) + (scale - 1)) / scale;
-	minx = minx - minx % 8;
-	maxx = (maxx + 7) - (maxx + 7) % 8;
-	minx = clamp_int(minx, 0, fb->width - 1);
-	maxx = clamp_int(maxx, 0, fb->width - 1);
-	miny = clamp_int(miny, 0, fb->height - 1);
-	maxy = clamp_int(maxy, 0, fb->height - 1);
-
-	// Half-edge constants
-	int C1 = DY12 * X1 - DX12 * Y1;
-	int C2 = DY23 * X2 - DX23 * Y2;
-	int C3 = DY31 * X3 - DX31 * Y3;
-
-	// Correct for fill convention
-	if (DY12 < 0 || (DY12 == 0 && DX12 > 0)) C1++;
-	if (DY23 < 0 || (DY23 == 0 && DX23 > 0)) C2++;
-	if (DY31 < 0 || (DY31 == 0 && DX31 > 0)) C3++;
-
-	float inv_denom = 1.0f / ((float)C1 + (float)C2 + (float)C3);
-
-	int CY1[8], CY2[8], CY3[8];
-	for (int i = 0;i < 8;i++) {
+	for (int i = 0; i < 8; i++) {
 		CY1[i] = C1 + FDX12 * (miny + 0) - FDY12 * (minx + i);
 		CY2[i] = C2 + FDX23 * (miny + 0) - FDY23 * (minx + i);
 		CY3[i] = C3 + FDX31 * (miny + 0) - FDY31 * (minx + i);
@@ -611,7 +448,7 @@ void rasterize_triangle_avx2_texture_index_only(framebuffer_i32* fb, framebuffer
 					tex_y = modulo_int_avx2(tex_y, tex_height);
 
 					__m256i index_vec = _mm256_add_epi32(_mm256_mullo_epi32(tex_y, tex_width_vec), tex_x);
-					index_vec = _mm256_mullo_epi32(index_vec, _mm256_set1_epi32(4));
+					//index_vec = _mm256_mullo_epi32(index_vec, _mm256_set1_epi32(4));
 					material_index_vec = _mm256_add_epi32(material_index_vec, index_vec);
 				}
 				if (mask_int == (int)0xFFFFFFFF) {
@@ -637,240 +474,211 @@ void rasterize_triangle_avx2_texture_index_only(framebuffer_i32* fb, framebuffer
 	}
 }
 
-void texture_sample_pass_4i8(framebuffer_i32* ib, framebuffer_4i8* fb, material_t* materials) {
+//DECLSPEC_NOINLINE
+//void texture_sample_pass_5r6g5b(framebuffer_i32* ib, framebuffer_u16* fb, material_t* materials) {
+//	int width = ib->width;
+//	int height = ib->height;
+//	int length = width * height;
+//	int32_t* ib_data = ib->data;
+//	uint16_t* fb_data = fb->data;
+//#define BLOCK_SIZE 64
+//	for (int i = 0;i < length;i += BLOCK_SIZE) {
+//		uint16_t pixels[BLOCK_SIZE];
+//		for (int j = 0;j < BLOCK_SIZE;j++) {
+//			int32_t material_index = *ib_data;
+//			int material_id = material_index >> 24;
+//			if (material_id != -1) {
+//				int texture_index = material_index & 0xFFFFFF;
+//				material_t* material = &materials[material_id];
+//				uint16_t* tex_data = (uint16_t*)material->diffuse_texture.data;
+//				if (material->diffuse_texture.data == NULL) {
+//					unsigned char r = (unsigned char)clamp_int(lroundf(material->diffuse[0] * 255.0f), 0, 255);
+//					unsigned char g = (unsigned char)clamp_int(lroundf(material->diffuse[1] * 255.0f), 0, 255);
+//					unsigned char b = (unsigned char)clamp_int(lroundf(material->diffuse[2] * 255.0f), 0, 255);
+//					pixels[j] = convert_8r8g8b8a_to_5r6g5b(r, g, b);
+//				}
+//				else {
+//					//memcpy(&pixels[j], tex_data + texture_index, 2);
+//					pixels[j] = tex_data[texture_index];
+//				}
+//			}
+//			else {
+//				pixels[j] = convert_8r8g8b8a_to_5r6g5b(255, 0, 255);
+//			}
+//			ib_data += 1;
+//		}
+//		memcpy(fb_data, pixels, BLOCK_SIZE * 2);
+//		fb_data += BLOCK_SIZE;
+//	}
+//}
+void texture_sample_pass_5r6g5b(framebuffer_i32* ib, framebuffer_u16* fb, material_t* materials, int num_materials) {
 	int width = ib->width;
 	int height = ib->height;
 	int length = width * height;
-	for (int i = 0;i < length;i++) {
-		int32_t material_index = ib->data[i];
+	int32_t* ib_data = ib->data;
+	uint16_t* fb_data = fb->data;
+	for (int i = 0; i < length; i += 1) {
+		int32_t material_index = *ib_data;
 		int material_id = material_index >> 24;
 		if (material_id != -1) {
 			int texture_index = material_index & 0xFFFFFF;
+			//int texture_index = 0;
 			material_t* material = &materials[material_id];
+			uint16_t* tex_data = (uint16_t*)material->diffuse_texture.data;
 			if (material->diffuse_texture.data == NULL) {
-				fb->data[i * 4 + 0] = (unsigned char)(material->diffuse[0] * 255.0f);
-				fb->data[i * 4 + 1] = (unsigned char)(material->diffuse[1] * 255.0f);
-				fb->data[i * 4 + 2] = (unsigned char)(material->diffuse[2] * 255.0f);
-				fb->data[i * 4 + 3] = 255;
+				unsigned char r = (unsigned char)clamp_int(lroundf(material->diffuse[0] * 255.0f), 0, 255);
+				unsigned char g = (unsigned char)clamp_int(lroundf(material->diffuse[1] * 255.0f), 0, 255);
+				unsigned char b = (unsigned char)clamp_int(lroundf(material->diffuse[2] * 255.0f), 0, 255);
+				*fb_data = convert_8r8g8b8a_to_5r6g5b(r, g, b);
 			}
 			else {
-				memcpy(&fb->data[i * 4], (unsigned char*)material->diffuse_texture.data + texture_index, 4);
+				*fb_data = tex_data[texture_index];
 			}
 		}
-	}
-}
-
-void rasterize_triangle_avx2_triangle_index_only(framebuffer_i32* fb, framebuffer_f* depth_buffer, processed_triangle_t triangle, int index) {
-
-	float v0_x, v0_y, v1_x, v1_y, v2_x, v2_y;
-	viewport_transform(&triangle.v0, fb->width, fb->height, &v0_x, &v0_y);
-	viewport_transform(&triangle.v1, fb->width, fb->height, &v1_x, &v1_y);
-	viewport_transform(&triangle.v2, fb->width, fb->height, &v2_x, &v2_y);
-
-	// 28.4 fixed-point coordinates
-	const int Y1 = rintf((float)scale * v0_y);
-	const int Y2 = rintf((float)scale * v1_y);
-	const int Y3 = rintf((float)scale * v2_y);
-
-	const int X1 = rintf((float)scale * v0_x);
-	const int X2 = rintf((float)scale * v1_x);
-	const int X3 = rintf((float)scale * v2_x);
-
-	// Deltas
-	const int DX12 = X1 - X2;
-	const int DX23 = X2 - X3;
-	const int DX31 = X3 - X1;
-
-	const int DY12 = Y1 - Y2;
-	const int DY23 = Y2 - Y3;
-	const int DY31 = Y3 - Y1;
-
-	// Fixed-point deltas
-	const int FDX12 = DX12 * scale;
-	const int FDX23 = DX23 * scale;
-	const int FDX31 = DX31 * scale;
-
-	const int FDY12 = DY12 * scale;
-	const int FDY23 = DY23 * scale;
-	const int FDY31 = DY31 * scale;
-
-	// Bounding rectangle
-	int minx = (min_int(min_int(X1, X2), X3) + (scale - 1)) / scale;
-	int maxx = (max_int(max_int(X1, X2), X3) + (scale - 1)) / scale;
-	int miny = (min_int(min_int(Y1, Y2), Y3) + (scale - 1)) / scale;
-	int maxy = (max_int(max_int(Y1, Y2), Y3) + (scale - 1)) / scale;
-	minx = minx - minx % 8;
-	maxx = (maxx + 7) - (maxx + 7) % 8;
-	minx = clamp_int(minx, 0, fb->width - 1);
-	maxx = clamp_int(maxx, 0, fb->width - 1);
-	miny = clamp_int(miny, 0, fb->height - 1);
-	maxy = clamp_int(maxy, 0, fb->height - 1);
-
-	// Half-edge constants
-	int C1 = DY12 * X1 - DX12 * Y1;
-	int C2 = DY23 * X2 - DX23 * Y2;
-	int C3 = DY31 * X3 - DX31 * Y3;
-
-	// Correct for fill convention
-	if (DY12 < 0 || (DY12 == 0 && DX12 > 0)) C1++;
-	if (DY23 < 0 || (DY23 == 0 && DX23 > 0)) C2++;
-	if (DY31 < 0 || (DY31 == 0 && DX31 > 0)) C3++;
-
-	float inv_denom = 1.0f / ((float)C1 + (float)C2 + (float)C3);
-
-	int CY1[8], CY2[8], CY3[8];
-	for (int i = 0;i < 8;i++) {
-		CY1[i] = C1 + FDX12 * (miny + 0) - FDY12 * (minx + i);
-		CY2[i] = C2 + FDX23 * (miny + 0) - FDY23 * (minx + i);
-		CY3[i] = C3 + FDX31 * (miny + 0) - FDY31 * (minx + i);
-	}
-
-	float* depth_buffer_ptr = depth_buffer->data;
-
-	__m256i cy1_vec = _mm256_loadu_si256((__m256i*)CY1);
-	__m256i cy2_vec = _mm256_loadu_si256((__m256i*)CY2);
-	__m256i cy3_vec = _mm256_loadu_si256((__m256i*)CY3);
-
-	const __m256i fdx12_vec = _mm256_set1_epi32(FDX12);
-	const __m256i fdx23_vec = _mm256_set1_epi32(FDX23);
-	const __m256i fdx31_vec = _mm256_set1_epi32(FDX31);
-
-	const __m256i eight_fdy12_vec = _mm256_set1_epi32(FDY12 * 8);
-	const __m256i eight_fdy23_vec = _mm256_set1_epi32(FDY23 * 8);
-	const __m256i eight_fdy31_vec = _mm256_set1_epi32(FDY31 * 8);
-
-	const __m256i zero_vec = _mm256_setzero_si256();
-
-	const __m256 v0w_inv_vec = _mm256_set1_ps(1.0f / triangle.v0.homogenous_position_w);
-	const __m256 v1w_inv_vec = _mm256_set1_ps(1.0f / triangle.v1.homogenous_position_w);
-	const __m256 v2w_inv_vec = _mm256_set1_ps(1.0f / triangle.v2.homogenous_position_w);
-
-	int area = C1 + C2 + C3;
-	float inv_area = 1.0f / (float)area;
-	const __m256 inv_area_vec = _mm256_set1_ps(inv_area);
-
-	if (area < scale && area > -scale) return; // Degenerate triangle, skip
-
-	int32_t* color_buffer = fb->data;
-	const __m256i index_vec = _mm256_set1_epi32(index);
-
-	for (int y = miny; y < maxy; y += 1)
-	{
-		color_buffer = fb->data + (y * fb->width + minx);
-		depth_buffer_ptr = depth_buffer->data + (y * depth_buffer->width + minx);
-
-		__m256i cx1_vec = cy1_vec;
-		__m256i cx2_vec = cy2_vec;
-		__m256i cx3_vec = cy3_vec;
-		for (int x = minx; x < maxx; x += 8) {
-			__m256i cmp1 = _mm256_cmpgt_epi32(cx1_vec, zero_vec);
-			__m256i cmp2 = _mm256_cmpgt_epi32(cx2_vec, zero_vec);
-			__m256i cmp3 = _mm256_cmpgt_epi32(cx3_vec, zero_vec);
-			__m256i positive_mask = _mm256_and_si256(_mm256_and_si256(cmp1, cmp2), cmp3);
-			__m256i negative_mask = _mm256_xor_si256(_mm256_or_si256(_mm256_or_si256(cmp1, cmp2), cmp3), _mm256_set1_epi32(-1));
-			__m256i inside_mask = _mm256_or_si256(positive_mask, negative_mask);
-
-			int inside_mask_int = _mm256_movemask_epi8(inside_mask);
-			if (inside_mask_int == 0) {
-				cx1_vec = _mm256_sub_epi32(cx1_vec, eight_fdy12_vec);
-				cx2_vec = _mm256_sub_epi32(cx2_vec, eight_fdy23_vec);
-				cx3_vec = _mm256_sub_epi32(cx3_vec, eight_fdy31_vec);
-				color_buffer += 8;
-				depth_buffer_ptr += 8;
-				continue;
-			}
-
-			__m256 alpha_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx2_vec), inv_area_vec);
-			__m256 beta_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx3_vec), inv_area_vec);
-			__m256 gamma_vec = _mm256_mul_ps(_mm256_cvtepi32_ps(cx1_vec), inv_area_vec);
-
-			__m256 w_interp_vec = _mm256_rcp_ps(dot_product_3vec8f(alpha_vec, beta_vec, gamma_vec, v0w_inv_vec, v1w_inv_vec, v2w_inv_vec));
-			__m256 current_depth_vec = _mm256_load_ps(depth_buffer_ptr);
-			__m256i depth_mask = _mm256_castps_si256(_mm256_cmp_ps(w_interp_vec, current_depth_vec, _CMP_LT_OQ));
-
-			__m256i mask = _mm256_and_si256(depth_mask, inside_mask);
-			int mask_int = _mm256_movemask_epi8(mask);
-
-			if (mask_int != 0) {
-				if (mask_int == (int)0xFFFFFFFF) {
-					_mm256_store_si256((__m256i*)color_buffer, index_vec);
-					_mm256_store_ps(depth_buffer_ptr, w_interp_vec);
-				}
-				else {
-					_mm256_maskstore_epi32((int*)color_buffer, mask, index_vec);
-					_mm256_maskstore_ps(depth_buffer_ptr, mask, w_interp_vec);
-				}
-			}
-
-			color_buffer += 8;
-			depth_buffer_ptr += 8;
-
-			cx1_vec = _mm256_sub_epi32(cx1_vec, eight_fdy12_vec);
-			cx2_vec = _mm256_sub_epi32(cx2_vec, eight_fdy23_vec);
-			cx3_vec = _mm256_sub_epi32(cx3_vec, eight_fdy31_vec);
+		else {
+			*fb_data = convert_8r8g8b8a_to_5r6g5b(255, 0, 255);
 		}
-		cy1_vec = _mm256_add_epi32(cy1_vec, fdx12_vec);
-		cy2_vec = _mm256_add_epi32(cy2_vec, fdx23_vec);
-		cy3_vec = _mm256_add_epi32(cy3_vec, fdx31_vec);
+		ib_data += 1;
+		fb_data += 1;
 	}
+	//for (int divider = 1; divider < 16; divider *= 2) {
+	//	printf("Divider = %d\r\n", divider);
+	//	for (int i = 0; i < 2; i++) {
+	//		for (int j = 0; j < 2; j++) {
+	//			int material_index = ib->data[i * width + j];
+	//			int material_id = material_index >> 24;
+	//			int texture_index = material_index & 0xFFFFFF;
+	//			int texture_x = texture_index % materials[material_id].diffuse_texture.width;
+	//			int texture_y = texture_index / materials[material_id].diffuse_texture.width;
+	//			printf("(%d, %d, %d) ",
+	//				material_id,
+	//				texture_x / divider, texture_y / divider
+	//			);
+	//		}
+	//		printf("\r\n");
+	//	}
+	//}
 }
+
+//void texture_sample_pass_5r6g5b(framebuffer_i32* ib, framebuffer_u16* fb, material_t* materials, int num_materials) {
+//	int width = ib->width;
+//	int height = ib->height;
+//	int length = width * height;
+//	for (int j = 0;j < num_materials;j++) {
+//		material_t* material = &materials[j];
+//		uint16_t* tex_data = (uint16_t*)material->diffuse_texture.data;
+//		uint16_t* fb_data = fb->data;
+//		int32_t* ib_data = ib->data;
+//		for (int i = 0;i < length;i += 1) {
+//			int32_t material_index = *ib_data;
+//			int material_id = material_index >> 24;
+//			if (material_id == j) {
+//				if (tex_data == NULL) {
+//					unsigned char r = (unsigned char)clamp_int(lroundf(material->diffuse[0] * 255.0f), 0, 255);
+//					unsigned char g = (unsigned char)clamp_int(lroundf(material->diffuse[1] * 255.0f), 0, 255);
+//					unsigned char b = (unsigned char)clamp_int(lroundf(material->diffuse[2] * 255.0f), 0, 255);
+//					*fb_data = convert_8r8g8b8a_to_5r6g5b(r, g, b);
+//				}
+//				else {
+//					int texture_index = material_index & 0xFFFFFF;
+//					*fb_data = tex_data[texture_index];
+//					printf("Mat %d, idx %d = ( %d, %d) at image idx %d\r\n",
+//						material_id, texture_index,
+//						texture_index / material->diffuse_texture.width,
+//						texture_index % material->diffuse_texture.width,
+//						i);
+//				}
+//			}
+//			fb_data++;
+//			ib_data++;
+//		}
+//	}
+//}
 
 /* =========================================================== */
 /*  Main Render Function                                       */
 /* =========================================================== */
 
-int use_avx2 = 1;
-int index_only = 0;
-int texture_index_only = 1;
 double total_texture_sample_time = 0.0;
 monotonic_timer_t texture_sample_timer;
+vec4* ndc_vertices = NULL;
+int ndc_vertices_len = 0;
+processed_triangle_t* processed_triangles = NULL;
+int processed_triangles_len = 0;
+int processed_triangles_count = 0;
 
 void render_mesh(mesh_t* mesh, mat4 model_view_projection, mat3 normal_transfrom, mat4 model_view,
-	framebuffer_4i8* fb, framebuffer_f* depth_buffer, framebuffer_i32* index_buffer) {
+	framebuffer_u16* fb, framebuffer_f* depth_buffer, framebuffer_i32* index_buffer) {
 
+	int num_vertices = mesh->attrib.num_vertices;
+	int num_required_vertices = num_vertices;
+	if (ndc_vertices_len < num_vertices) {
+		ndc_vertices = (vec4*)realloc(ndc_vertices, sizeof(vec4) * num_vertices);
+		ndc_vertices_len = num_vertices;
+	}
+	int num_triangles = mesh->attrib.num_face_num_verts;
+	if (processed_triangles_len < num_triangles) {
+		processed_triangles = (processed_triangle_t*)realloc(processed_triangles, sizeof(processed_triangle_t) * num_triangles * 2);
+		processed_triangles_len = num_triangles;
+	}
+
+	for (int i = 0; i < num_vertices; i++) {
+		float vertex_x = mesh->attrib.vertices[3 * i + 0];
+		float vertex_y = mesh->attrib.vertices[3 * i + 1];
+		float vertex_z = mesh->attrib.vertices[3 * i + 2];
+		vec4 position = { vertex_x, vertex_y, vertex_z, 1.0f };
+		vec4 homogenous_position;
+		glm_mat4_mulv(model_view_projection, position, homogenous_position);
+		glm_vec4_copy(homogenous_position, &ndc_vertices[i][0]);
+	}
+
+	int processed_triangles_count = 0;
 	for (int i = (int)mesh->start_triangle_index; i < (int)mesh->end_triangle_index; i++) {
-		raw_vertex_t vert_input0 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 0]);
-		raw_vertex_t vert_input1 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 1]);
-		raw_vertex_t vert_input2 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 2]);
-
-		processed_vertex_t vert0 = process_vertex(vert_input0, model_view_projection);
-		processed_vertex_t vert1 = process_vertex(vert_input1, model_view_projection);
-		processed_vertex_t vert2 = process_vertex(vert_input2, model_view_projection);
+		processed_vertex_t vert0 = process_vertex_2(ndc_vertices, mesh->attrib, mesh->attrib.faces[i * 3 + 0]);
+		processed_vertex_t vert1 = process_vertex_2(ndc_vertices, mesh->attrib, mesh->attrib.faces[i * 3 + 1]);
+		processed_vertex_t vert2 = process_vertex_2(ndc_vertices, mesh->attrib, mesh->attrib.faces[i * 3 + 2]);
 
 		processed_triangle_t triangle = { vert0, vert1, vert2 };
 		processed_triangle_t clipped_triangle0, clipped_triangle1;
 		int num_clipped_triangles = 0;
-		clip_triangle(triangle, &clipped_triangle0, &clipped_triangle1, &num_clipped_triangles);
-
 		int mat_idx = mesh->attrib.material_ids[i];
 		int is_textured = 0;
 		int tex_width = 0;
 		int tex_height = 0;
 		if (mat_idx != -1) {
-			if (mesh->materials[mat_idx].diffuse_texture.data != NULL)
+			if (mesh->materials[mat_idx].diffuse_texture.data != NULL) {
 				is_textured = 1;
-			tex_width = mesh->materials[mat_idx].diffuse_texture.width;
-			tex_height = mesh->materials[mat_idx].diffuse_texture.height;
+				tex_width = mesh->materials[mat_idx].diffuse_texture.width;
+				tex_height = mesh->materials[mat_idx].diffuse_texture.height;
+			}
 		}
+		clip_triangle(triangle, &clipped_triangle0, &clipped_triangle1, &num_clipped_triangles);
+		clipped_triangle0.material_id = mat_idx;
+		clipped_triangle0.tex_width = tex_width;
+		clipped_triangle0.tex_height = tex_height;
+		clipped_triangle1.material_id = mat_idx;
+		clipped_triangle1.tex_width = tex_width;
+		clipped_triangle1.tex_height = tex_height;
 
-		if (num_clipped_triangles > 0)
-			rasterize_triangle_avx2_texture_index_only(index_buffer, depth_buffer,
-				clipped_triangle0, mat_idx, tex_width, tex_height, is_textured);
-		if (num_clipped_triangles > 1)
-			rasterize_triangle_avx2_texture_index_only(index_buffer, depth_buffer,
-				clipped_triangle1, mat_idx, tex_width, tex_height, is_textured);
-		//if (num_clipped_triangles > 0)
-		//	rasterize_triangle_avx2(fb, depth_buffer,
-		//		clipped_triangle0, mesh->materials[mat_idx]);
-		//if (num_clipped_triangles > 1)
-		//	rasterize_triangle_avx2(fb, depth_buffer,
-		//		clipped_triangle1, mesh->materials[mat_idx]);
-
+		if (num_clipped_triangles == 0) continue;
+		if (fabsf(get_processed_triangle_area(clipped_triangle0, fb->width, fb->height)) > 1.0f) {
+			processed_triangles[processed_triangles_count++] = clipped_triangle0;
+		}
+		if (num_clipped_triangles == 1) continue;
+		if (fabsf(get_processed_triangle_area(clipped_triangle1, fb->width, fb->height)) > 1.0f) {
+			processed_triangles[processed_triangles_count++] = clipped_triangle1;
+		}
 	}
 
-	//timer_start(&texture_sample_timer);
-	texture_sample_pass_4i8(index_buffer, fb, mesh->materials);
-	//total_texture_sample_time += timer_elapsed_ms(&texture_sample_timer);
+	for (int i = 0; i < processed_triangles_count; i++) {
+		processed_triangle_t triangle = processed_triangles[i];
+		rasterize_triangle_avx2_texture_index_only(index_buffer, depth_buffer, triangle);
+	}
+
+	timer_start(&texture_sample_timer);
+	texture_sample_pass_5r6g5b(index_buffer, fb, mesh->materials, mesh->num_materials);
+	total_texture_sample_time += timer_elapsed_ms(&texture_sample_timer);
+
 }
 
 #endif
