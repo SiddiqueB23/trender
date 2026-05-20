@@ -9,6 +9,8 @@
 #include "rainbow.h"
 #include "textures.h"
 #include "utils.h"
+#include "timer.h"
+#include <immintrin.h>
 #include <stdint.h>
 
 typedef int sixel_palette_color[3];
@@ -239,40 +241,6 @@ void convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216
 	}
 }
 
-void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_indexed_bitmap* bitmap, framebuffer_u16 fb) {
-	int img_x = fb.width, img_y = fb.height, img_n = 1;
-	const int num_steps = 5;
-	uint16_t* image_data_ptr = fb.data;
-	unsigned char divider = 256 / num_steps;
-	const int step_plus_one = num_steps + 1;
-	const int step_plus_one_squared = step_plus_one * step_plus_one;
-	unsigned char* index_data_ptr = bitmap->index_data;
-
-	for (int y = 0; y < img_y; y++) {
-		for (int x = 0; x < img_x; x++) {
-			unsigned char bayer_y = y % 16;
-			unsigned char bayer_x = x % 16;
-			uint16_t color_5r6g5b = *(image_data_ptr);
-			unsigned char color_arr[4];
-			convert_5r6g5b_to_8r8g8b8a(color_5r6g5b, (unsigned char*)&color_arr);
-			image_data_ptr += img_n;
-
-			unsigned char r = color_arr[0];
-			unsigned char g = color_arr[1];
-			unsigned char b = color_arr[2];
-			unsigned char t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
-			unsigned char corr = (t / num_steps);
-			unsigned char r_x = (r + corr) / divider;
-			unsigned char g_x = (g + corr) / divider;
-			unsigned char b_x = (b + corr) / divider;
-
-			unsigned char color_num = r_x * step_plus_one_squared + g_x * step_plus_one + b_x;
-			*index_data_ptr = color_num;
-			index_data_ptr++;
-		}
-	}
-}
-
 const unsigned char BAYER_PATTERN_16X16_DIVIDED_BY_5[16][16] = { //	16x16 Bayer Dithering Matrix.  Color levels: 256
 {  0 ,  38 ,   9 ,  47 ,   2 ,  40 ,  12 ,  50 ,   0 ,  38 ,  10 ,  48 ,   3 ,  41 ,  12 ,  50 },
 { 25 ,  12 ,  35 ,  22 ,  27 ,  15 ,  37 ,  24 ,  26 ,  13 ,  35 ,  23 ,  28 ,  15 ,  38 ,  25 },
@@ -319,8 +287,6 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2
 			unsigned char image_data[4];
 			memcpy(image_data, image_data_ptr, 4);
 			for (int i = 0; i < 4; i++) {
-				//image_data[i] += corr;
-				//image_data[i] /= divider;
 				image_data[i] = (image_data[i] + corr) / divider;
 			}
 
@@ -329,32 +295,10 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2
 				image_data[1] * step_plus_one +
 				image_data[2];
 			*index_data_ptr = color_num;
-			//*index_data_ptr = rg_lut[image_data[0]][image_data[1]] + image_data[2];
 			image_data_ptr += img_n;
 			index_data_ptr++;
 		}
 	}
-
-	//for (int i = 0;i < 16;i++) {
-	//	printf("{");
-	//	for (int j = 0;j < 16;j++) {
-	//		printf("%3d ", BAYER_PATTERN_16X16[i][j]/5);
-	//		if (j < 15) {
-	//			printf(", ");
-	//		}
-	//	}
-	//	printf("},\r\n");
-	//}
-	//for (int r = 0; r < 6; r++) {
-	//	printf("{");
-	//	for (int g = 0; g < 6; g++) {
-	//		printf("%3d ", r * 36 + g * 6);
-	//		if (g < 5) {
-	//			printf(", ");
-	//		}
-	//	}
-	//	printf("},\r\n");
-	//}
 }
 
 typedef uint64_t sixel_column_t;
@@ -367,6 +311,10 @@ typedef struct {
 	int header_valid;
 	int header_data_size;
 	int data_size;
+	int sixel_data_size;
+	double total_generation_time;
+	double total_conversion_time;
+	monotonic_timer_t timer;
 	int painted[2048];
 	sixel_column_t transposed[2048];
 } sixel_display_ctx;
@@ -379,6 +327,8 @@ void init_sixel_display_ctx(sixel_display_ctx* ctx, int width, int height) {
 	ctx->header_valid = 0;
 	ctx->header_data_size = 0;
 	ctx->data_size = 0;
+	ctx->total_conversion_time = 0.0;
+	ctx->total_generation_time = 0.0;
 }
 
 void free_sixel_display_ctx(sixel_display_ctx* ctx) {
@@ -386,6 +336,216 @@ void free_sixel_display_ctx(sixel_display_ctx* ctx) {
 		free(ctx->data);
 		ctx->data = NULL;
 	}
+}
+
+void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_display_ctx* ctx, framebuffer_u16 fb) {
+	sixel_indexed_bitmap* bitmap = &ctx->bitmap;
+	timer_start(&ctx->timer);
+	int img_x = fb.width, img_y = fb.height, img_n = 1;
+	const int num_steps = 5;
+	uint16_t* image_data_ptr = fb.data;
+	unsigned char divider = 256 / num_steps;
+	const int step_plus_one = num_steps + 1;
+	const int step_plus_one_squared = step_plus_one * step_plus_one;
+	unsigned char* index_data_ptr = bitmap->index_data;
+
+	for (int y = 0; y < img_y; y++) {
+		for (int x = 0; x < img_x; x++) {
+			unsigned char bayer_y = y % 16;
+			unsigned char bayer_x = x % 16;
+			uint16_t color_5r6g5b = *(image_data_ptr);
+			unsigned char color_arr[4];
+			convert_5r6g5b_to_8r8g8b8a(color_5r6g5b, (unsigned char*)&color_arr);
+			image_data_ptr += img_n;
+
+			unsigned char r = color_arr[0];
+			unsigned char g = color_arr[1];
+			unsigned char b = color_arr[2];
+			unsigned char t = BAYER_PATTERN_16X16[bayer_y][bayer_x];
+			unsigned char corr = (t / num_steps);
+			unsigned char r_x = (r + corr) / divider;
+			unsigned char g_x = (g + corr) / divider;
+			unsigned char b_x = (b + corr) / divider;
+
+			unsigned char color_num = r_x * step_plus_one_squared + g_x * step_plus_one + b_x;
+			*index_data_ptr = color_num;
+			index_data_ptr++;
+		}
+	}
+	ctx->total_conversion_time += timer_elapsed_ms(&ctx->timer);
+}
+//
+//alignas(64) const uint16_t BAYER_PATTERN_16X16_DIVIDED_BY_5_u16[16][16] = { //	16x16 Bayer Dithering Matrix.  Color levels: 256
+//{  0 ,  38 ,   9 ,  47 ,   2 ,  40 ,  12 ,  50 ,   0 ,  38 ,  10 ,  48 ,   3 ,  41 ,  12 ,  50 },
+//{ 25 ,  12 ,  35 ,  22 ,  27 ,  15 ,  37 ,  24 ,  26 ,  13 ,  35 ,  23 ,  28 ,  15 ,  38 ,  25 },
+//{  6 ,  44 ,   3 ,  41 ,   8 ,  47 ,   5 ,  43 ,   7 ,  45 ,   3 ,  42 ,   9 ,  47 ,   6 ,  44 },
+//{ 31 ,  19 ,  28 ,  16 ,  34 ,  21 ,  31 ,  18 ,  32 ,  19 ,  29 ,  16 ,  34 ,  22 ,  31 ,  19 },
+//{  1 ,  39 ,  11 ,  49 ,   0 ,  39 ,  10 ,  48 ,   2 ,  40 ,  11 ,  50 ,   1 ,  39 ,  11 ,  49 },
+//{ 27 ,  14 ,  36 ,  24 ,  26 ,  13 ,  35 ,  23 ,  27 ,  15 ,  37 ,  24 ,  26 ,  14 ,  36 ,  23 },
+//{  8 ,  46 ,   4 ,  43 ,   7 ,  45 ,   4 ,  42 ,   8 ,  46 ,   5 ,  43 ,   7 ,  46 ,   4 ,  42 },
+//{ 33 ,  20 ,  30 ,  17 ,  32 ,  20 ,  29 ,  16 ,  34 ,  21 ,  30 ,  18 ,  33 ,  20 ,  30 ,  17 },
+//{  0 ,  38 ,  10 ,  48 ,   2 ,  41 ,  12 ,  50 ,   0 ,  38 ,   9 ,  48 ,   2 ,  40 ,  12 ,  50 },
+//{ 25 ,  13 ,  35 ,  22 ,  28 ,  15 ,  37 ,  25 ,  25 ,  13 ,  35 ,  22 ,  28 ,  15 ,  37 ,  25 },
+//{  6 ,  45 ,   3 ,  41 ,   9 ,  47 ,   6 ,  44 ,   6 ,  44 ,   3 ,  41 ,   9 ,  47 ,   5 ,  44 },
+//{ 32 ,  19 ,  29 ,  16 ,  34 ,  22 ,  31 ,  18 ,  32 ,  19 ,  28 ,  16 ,  34 ,  21 ,  31 ,  18 },
+//{  2 ,  40 ,  11 ,  49 ,   1 ,  39 ,  10 ,  49 ,   1 ,  40 ,  11 ,  49 ,   1 ,  39 ,  10 ,  48 },
+//{ 27 ,  14 ,  37 ,  24 ,  26 ,  14 ,  36 ,  23 ,  27 ,  14 ,  36 ,  24 ,  26 ,  13 ,  36 ,  23 },
+//{  8 ,  46 ,   5 ,  43 ,   7 ,  45 ,   4 ,  42 ,   8 ,  46 ,   5 ,  43 ,   7 ,  45 ,   4 ,  42 },
+//{ 33 ,  21 ,  30 ,  18 ,  33 ,  20 ,  29 ,  17 ,  33 ,  21 ,  30 ,  17 ,  32 ,  20 ,  29 ,  17 },
+//};
+
+void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
+	sixel_indexed_bitmap* bitmap = &ctx->bitmap;
+	timer_start(&ctx->timer);
+	int img_x = fb.width, img_y = fb.height, img_n = 1;
+	uint16_t* image_data_ptr = fb.data;
+	unsigned char* index_data_ptr = bitmap->index_data;
+
+	const __m256i step_plus_one_vec = _mm256_set1_epi16((short)6);
+	const __m256i step_plus_one_squared_vec = _mm256_set1_epi16((short)36);
+	const __m256i divider_vec = _mm256_set1_epi16((short)(256 / 5));
+	__m256i bayer_16x16_divby5_vec[16];
+	bayer_16x16_divby5_vec[0] = _mm256_setr_epi16(0, 38, 9, 47, 2, 40, 12, 50, 0, 38, 10, 48, 3, 41, 12, 50);
+	bayer_16x16_divby5_vec[1] = _mm256_setr_epi16(25, 12, 35, 22, 27, 15, 37, 24, 26, 13, 35, 23, 28, 15, 38, 25);
+	bayer_16x16_divby5_vec[2] = _mm256_setr_epi16(6, 44, 3, 41, 8, 47, 5, 43, 7, 45, 3, 42, 9, 47, 6, 44);
+	bayer_16x16_divby5_vec[3] = _mm256_setr_epi16(31, 19, 28, 16, 34, 21, 31, 18, 32, 19, 29, 16, 34, 22, 31, 19);
+	bayer_16x16_divby5_vec[4] = _mm256_setr_epi16(1, 39, 11, 49, 0, 39, 10, 48, 2, 40, 11, 50, 1, 39, 11, 49);
+	bayer_16x16_divby5_vec[5] = _mm256_setr_epi16(27, 14, 36, 24, 26, 13, 35, 23, 27, 15, 37, 24, 26, 14, 36, 23);
+	bayer_16x16_divby5_vec[6] = _mm256_setr_epi16(8, 46, 4, 43, 7, 45, 4, 42, 8, 46, 5, 43, 7, 46, 4, 42);
+	bayer_16x16_divby5_vec[7] = _mm256_setr_epi16(33, 20, 30, 17, 32, 20, 29, 16, 34, 21, 30, 18, 33, 20, 30, 17);
+	bayer_16x16_divby5_vec[8] = _mm256_setr_epi16(0, 38, 10, 48, 2, 41, 12, 50, 0, 38, 9, 48, 2, 40, 12, 50);
+	bayer_16x16_divby5_vec[9] = _mm256_setr_epi16(25, 13, 35, 22, 28, 15, 37, 25, 25, 13, 35, 22, 28, 15, 37, 25);
+	bayer_16x16_divby5_vec[10] = _mm256_setr_epi16(6, 45, 3, 41, 9, 47, 6, 44, 6, 44, 3, 41, 9, 47, 5, 44);
+	bayer_16x16_divby5_vec[11] = _mm256_setr_epi16(32, 19, 29, 16, 34, 22, 31, 18, 32, 19, 28, 16, 34, 21, 31, 18);
+	bayer_16x16_divby5_vec[12] = _mm256_setr_epi16(2, 40, 11, 49, 1, 39, 10, 49, 1, 40, 11, 49, 1, 39, 10, 48);
+	bayer_16x16_divby5_vec[13] = _mm256_setr_epi16(27, 14, 37, 24, 26, 14, 36, 23, 27, 14, 36, 24, 26, 13, 36, 23);
+	bayer_16x16_divby5_vec[14] = _mm256_setr_epi16(8, 46, 5, 43, 7, 45, 4, 42, 8, 46, 5, 43, 7, 45, 4, 42);
+	bayer_16x16_divby5_vec[15] = _mm256_setr_epi16(33, 21, 30, 18, 33, 20, 29, 17, 33, 21, 30, 17, 32, 20, 29, 17);
+
+	const __m256i bitmask5_vec = _mm256_set1_epi16((short)0x1F);
+	const __m256i bitmask6_vec = _mm256_set1_epi16((short)0x3F);
+	const __m256i const_255_vec = _mm256_set1_epi16((short)255);
+	const __m256i const_31_vec = _mm256_set1_epi16((short)31);
+	const __m256i const_63_vec = _mm256_set1_epi16((short)63);
+
+	for (int y = 0; y < img_y; y++) {
+		int bayer_y = y % 16;
+		__m256i t_divby5_vec = bayer_16x16_divby5_vec[bayer_y];
+		for (int x = 0; x < img_x; x += 16) {
+			__m256i color_vec = _mm256_loadu_epi16(image_data_ptr);
+			__m256i r_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 11), bitmask5_vec);
+			__m256i g_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 5), bitmask6_vec);
+			__m256i b_vec = _mm256_and_si256(color_vec, bitmask5_vec);
+			r_vec = _mm256_div_epi16(_mm256_mullo_epi16(r_vec, const_255_vec), const_31_vec);
+			g_vec = _mm256_div_epi16(_mm256_mullo_epi16(g_vec, const_255_vec), const_63_vec);
+			b_vec = _mm256_div_epi16(_mm256_mullo_epi16(b_vec, const_255_vec), const_31_vec);
+			__m256i r_dithered_vec = _mm256_div_epi16(_mm256_add_epi16(r_vec, t_divby5_vec), divider_vec);
+			__m256i g_dithered_vec = _mm256_div_epi16(_mm256_add_epi16(g_vec, t_divby5_vec), divider_vec);
+			__m256i b_dithered_vec = _mm256_div_epi16(_mm256_add_epi16(b_vec, t_divby5_vec), divider_vec);
+			__m256i color_num_vec = _mm256_add_epi16(
+				_mm256_add_epi16(
+					_mm256_mullo_epi16(r_dithered_vec, step_plus_one_squared_vec),
+					_mm256_mullo_epi16(g_dithered_vec, step_plus_one_vec)
+				),
+				b_dithered_vec
+			);
+			const __m256i shuf = _mm256_set_epi8(
+				-1, -1, -1, -1, -1, -1, -1, -1, 14, 12, 10, 8, 6, 4, 2, 0,  // high lane
+				-1, -1, -1, -1, -1, -1, -1, -1, 14, 12, 10, 8, 6, 4, 2, 0   // low lane
+			);
+
+			color_num_vec = _mm256_shuffle_epi8(color_num_vec, shuf);  // gather low bytes to bottom of each lane
+
+			// Extract low 64 bits from each lane and store 16 bytes total
+			uint64_t lo = _mm256_extract_epi64(color_num_vec, 0);  // low lane result
+			uint64_t hi = _mm256_extract_epi64(color_num_vec, 2);  // high lane result
+
+			memcpy(index_data_ptr, &lo, 8);
+			memcpy(index_data_ptr + 8, &hi, 8);
+			index_data_ptr += 16;
+			image_data_ptr += 16;
+		}
+	}
+	ctx->total_conversion_time += timer_elapsed_ms(&ctx->timer);
+}
+
+
+void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
+	sixel_indexed_bitmap* bitmap = &ctx->bitmap;
+	timer_start(&ctx->timer);
+	int img_x = fb.width, img_y = fb.height, img_n = 1;
+	uint16_t* image_data_ptr = fb.data;
+	unsigned char* index_data_ptr = bitmap->index_data;
+
+	const __m256i step_plus_one_vec = _mm256_set1_epi16((short)6);
+	const __m256i step_plus_one_squared_vec = _mm256_set1_epi16((short)36);
+	const __m256i divider_vec = _mm256_set1_epi16((short)(256 / 5));
+	__m256i bayer_16x16_divby5_vec[16];
+	bayer_16x16_divby5_vec[0] = _mm256_setr_epi16(0, 38, 9, 47, 2, 40, 12, 50, 0, 38, 10, 48, 3, 41, 12, 50);
+	bayer_16x16_divby5_vec[1] = _mm256_setr_epi16(25, 12, 35, 22, 27, 15, 37, 24, 26, 13, 35, 23, 28, 15, 38, 25);
+	bayer_16x16_divby5_vec[2] = _mm256_setr_epi16(6, 44, 3, 41, 8, 47, 5, 43, 7, 45, 3, 42, 9, 47, 6, 44);
+	bayer_16x16_divby5_vec[3] = _mm256_setr_epi16(31, 19, 28, 16, 34, 21, 31, 18, 32, 19, 29, 16, 34, 22, 31, 19);
+	bayer_16x16_divby5_vec[4] = _mm256_setr_epi16(1, 39, 11, 49, 0, 39, 10, 48, 2, 40, 11, 50, 1, 39, 11, 49);
+	bayer_16x16_divby5_vec[5] = _mm256_setr_epi16(27, 14, 36, 24, 26, 13, 35, 23, 27, 15, 37, 24, 26, 14, 36, 23);
+	bayer_16x16_divby5_vec[6] = _mm256_setr_epi16(8, 46, 4, 43, 7, 45, 4, 42, 8, 46, 5, 43, 7, 46, 4, 42);
+	bayer_16x16_divby5_vec[7] = _mm256_setr_epi16(33, 20, 30, 17, 32, 20, 29, 16, 34, 21, 30, 18, 33, 20, 30, 17);
+	bayer_16x16_divby5_vec[8] = _mm256_setr_epi16(0, 38, 10, 48, 2, 41, 12, 50, 0, 38, 9, 48, 2, 40, 12, 50);
+	bayer_16x16_divby5_vec[9] = _mm256_setr_epi16(25, 13, 35, 22, 28, 15, 37, 25, 25, 13, 35, 22, 28, 15, 37, 25);
+	bayer_16x16_divby5_vec[10] = _mm256_setr_epi16(6, 45, 3, 41, 9, 47, 6, 44, 6, 44, 3, 41, 9, 47, 5, 44);
+	bayer_16x16_divby5_vec[11] = _mm256_setr_epi16(32, 19, 29, 16, 34, 22, 31, 18, 32, 19, 28, 16, 34, 21, 31, 18);
+	bayer_16x16_divby5_vec[12] = _mm256_setr_epi16(2, 40, 11, 49, 1, 39, 10, 49, 1, 40, 11, 49, 1, 39, 10, 48);
+	bayer_16x16_divby5_vec[13] = _mm256_setr_epi16(27, 14, 37, 24, 26, 14, 36, 23, 27, 14, 36, 24, 26, 13, 36, 23);
+	bayer_16x16_divby5_vec[14] = _mm256_setr_epi16(8, 46, 5, 43, 7, 45, 4, 42, 8, 46, 5, 43, 7, 45, 4, 42);
+	bayer_16x16_divby5_vec[15] = _mm256_setr_epi16(33, 21, 30, 18, 33, 20, 29, 17, 33, 21, 30, 17, 32, 20, 29, 17);
+
+	const __m256i bitmask5_vec = _mm256_set1_epi16((short)0x1F);
+	const __m256i bitmask6_vec = _mm256_set1_epi16((short)0x3F);
+	const __m256i const_255_vec = _mm256_set1_epi16((short)255);
+	const __m256i const_31_vec = _mm256_set1_epi16((short)31);
+	const __m256i const_63_vec = _mm256_set1_epi16((short)63);
+
+	for (int y = 0; y < img_y; y++) {
+		int bayer_y = y % 16;
+		__m256i t_divby5_vec = bayer_16x16_divby5_vec[bayer_y];
+		for (int x = 0; x < img_x; x += 32) {
+			__m256i color_num_vecs[2];
+			for (int i = 0;i < 2;i++) {
+				__m256i color_vec = _mm256_loadu_epi16(image_data_ptr);
+				__m256i r_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 11), bitmask5_vec);
+				__m256i g_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 5), bitmask6_vec);
+				__m256i b_vec = _mm256_and_si256(color_vec, bitmask5_vec);
+				r_vec = _mm256_div_epi16(_mm256_mullo_epi16(r_vec, const_255_vec), const_31_vec);
+				g_vec = _mm256_div_epi16(_mm256_mullo_epi16(g_vec, const_255_vec), const_63_vec);
+				b_vec = _mm256_div_epi16(_mm256_mullo_epi16(b_vec, const_255_vec), const_31_vec);
+				__m256i r_dithered_vec = _mm256_div_epi16(_mm256_add_epi16(r_vec, t_divby5_vec), divider_vec);
+				__m256i g_dithered_vec = _mm256_div_epi16(_mm256_add_epi16(g_vec, t_divby5_vec), divider_vec);
+				__m256i b_dithered_vec = _mm256_div_epi16(_mm256_add_epi16(b_vec, t_divby5_vec), divider_vec);
+				color_num_vecs[i] = _mm256_add_epi16(
+					_mm256_add_epi16(
+						_mm256_mullo_epi16(r_dithered_vec, step_plus_one_squared_vec),
+						_mm256_mullo_epi16(g_dithered_vec, step_plus_one_vec)
+					),
+					b_dithered_vec
+				);
+				image_data_ptr += 16;
+			}
+			// Mask to keep only low bytes (avoid saturation clamping)
+			__m256i mask = _mm256_set1_epi16(0x00FF);
+			color_num_vecs[0] = _mm256_and_si256(color_num_vecs[0], mask);
+			color_num_vecs[1] = _mm256_and_si256(color_num_vecs[1], mask);
+
+			// Pack 16-bit -> 8-bit (unsigned saturation, safe after masking)
+			__m256i packed = _mm256_packus_epi16(color_num_vecs[0], color_num_vecs[1]);
+
+			// Fix lane permutation: packus interleaves 128-bit lanes
+			// Result order: [a0..a7, b0..b7, a8..a15, b8..b15]
+			packed = _mm256_permute4x64_epi64(packed, _MM_SHUFFLE(3, 1, 2, 0));
+
+			_mm256_storeu_si256((__m256i*)index_data_ptr, packed);
+			index_data_ptr += 32;
+		}
+	}
+	ctx->total_conversion_time += timer_elapsed_ms(&ctx->timer);
 }
 
 char* fast_itoa(char* buffer, int value) {
@@ -618,13 +778,6 @@ static inline char* encode_sixel_row_alt(sixel_display_ctx* ctx, char* buffer, i
 	return buffer;
 }
 
-//void print_binary(sixel_column_t n) {
-//	for (int i = 63; i >= 0; i--) {
-//		printf("%d", (n >> i) & 1);
-//		if (i % 8 == 0)printf(" ");
-//	}
-//}
-
 const sixel_column_t LSB_SET_EACH_BYTE = 0x0101010101010101ULL;
 const sixel_column_t MSB_SET_EACH_BYTE = 0x8080808080808080ULL;
 static inline int get_color_mask_for_column_opt(sixel_column_t* transposed, int x, int full_column, sixel_column_t packed_color) {
@@ -734,13 +887,14 @@ static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffe
 		if (x == width) {
 			buffer = encode_sixel_data_carriage_return(buffer);
 			x = 0;
-			ctx->data_size = buffer - ctx->data;
 		}
 	}
 	return buffer;
 }
 
 void generate_sixel_display_data(sixel_display_ctx* ctx) {
+	timer_start(&ctx->timer);
+
 	if (!ctx->header_valid) {
 		char* palette_ptr = ctx->header_data; // Reset pointer to the start
 		palette_ptr += sprintf(palette_ptr, "\x1b[H");
@@ -758,20 +912,24 @@ void generate_sixel_display_data(sixel_display_ctx* ctx) {
 	char* buffer_ptr = ctx->sixel_data;
 
 	ctx->data_size = ctx->header_data_size;
+	ctx->sixel_data_size = 0;
+	buffer_ptr = encode_sixel_data_carriage_return(buffer_ptr);
+
 	for (int row_start = 0; row_start < ctx->bitmap.height; row_start += 6) {
 		int row_height = (row_start + 6 <= ctx->bitmap.height) ? 6 : (ctx->bitmap.height - row_start);
 		//buffer_ptr = encode_sixel_row(ctx, buffer_ptr, row_start, ctx->bitmap.width, row_height);
 		//buffer_ptr = encode_sixel_row_alt(ctx, buffer_ptr, row_start, ctx->bitmap.width, row_height);
 		buffer_ptr = encode_sixel_row_alt_opt(ctx, buffer_ptr, row_start, ctx->bitmap.width, row_height);
 		buffer_ptr = encode_sixel_data_new_line(buffer_ptr);
-		ctx->data_size = buffer_ptr - ctx->data;
-		assert(buffer_ptr - ctx->data < 720 * 180 * 8);
 	}
 
 	// Append Sixel terminator to the pixel buffer
 	buffer_ptr = encode_sixel_data_terminator(buffer_ptr);
 	*buffer_ptr = '\0';
 	ctx->data_size = buffer_ptr - ctx->data;
+	ctx->sixel_data_size = buffer_ptr - ctx->sixel_data;
+
+	ctx->total_generation_time += timer_elapsed_ms(&ctx->timer);
 }
 
 #endif // SIXEL_DISPLAY_H

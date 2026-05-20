@@ -1,5 +1,7 @@
 #ifndef BAYER_PATTERNS_H
 #define BAYER_PATTERNS_H
+#include <stdint.h>
+#include <stdalign.h>
 
 const int BAYER_PATTERN_2X2[2][2] = { //	2x2 Bayer Dithering Matrix. Color levels: 5
     {51, 206},
@@ -44,6 +46,6 @@ const unsigned char BAYER_PATTERN_16X16[16][16] = { //	16x16 Bayer Dithering Mat
     {10, 201, 58, 249, 6, 197, 54, 245, 9, 200, 57, 248, 5, 196, 53, 244},
     {137, 74, 185, 122, 133, 70, 181, 118, 136, 73, 184, 121, 132, 69, 180, 117},
     {42, 233, 26, 217, 38, 229, 22, 213, 41, 232, 25, 216, 37, 228, 21, 212},
-    {169, 106, 153, 90, 165, 102, 149, 86, 168, 105, 152, 89, 164, 101, 148, 85}};
+    {169, 106, 153, 90, 165, 102, 149, 86, 168, 105, 152, 89, 164, 101, 148, 85} };
 
 #endif // BAYER_PATTERNS_H

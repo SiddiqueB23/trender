@@ -52,6 +52,10 @@ int get_pixel_i32(framebuffer_i32 *fb, int x, int y, int32_t *val) {
 }
 
 int clear_framebuffer_i32(framebuffer_i32 *fb, int32_t val) {
+    if (val == (int32_t)0 || val == (int32_t)-1) {
+        memset(fb->data, (int)(val & 0xFF), fb->width * fb->height * sizeof(int32_t));
+        return 0;
+    }
     for (int y = 0; y < fb->height; y++) {
         for (int x = 0; x < fb->width; x++) {
             set_pixel_i32(fb, x, y, val);

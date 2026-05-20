@@ -431,7 +431,7 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t triangle, r
 	int32_t* index_buffer_ptr = index_buffer->data;
 	float* depth_buffer_ptr = depth_buffer->data;
 
-	for (int y = miny; y < maxy; y += 1)
+	for (int y = miny; y <= maxy; y += 1)
 	{
 		index_buffer_ptr = index_buffer->data + ((y - starty) * width + minx);
 		depth_buffer_ptr = depth_buffer->data + ((y - starty) * width + minx);
@@ -524,14 +524,16 @@ void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, material_t* materials, int
 	int length = width * height;
 	int32_t* ib_data = index_buffer->data;
 	uint16_t* fb_data = output_buffer->data;
+	//if (fb_data == NULL)return;
 	for (int i = 0; i < length; i += 1) {
 		int32_t material_index = ib_data[i];
 		int material_id = material_index >> 24;
-		if (material_id != -1) {
+		if (material_id >= 0 && material_id < num_materials) {
 			int texture_index = material_index & 0xFFFFFF;
 			material_t* material = &materials[material_id];
 			uint16_t* tex_data = (uint16_t*)material->diffuse_texture.data;
-			if (material->diffuse_texture.data == NULL) {
+			if (texture_index > material->diffuse_texture.width * material->diffuse_texture.height || texture_index < 0
+				|| material->diffuse_texture.data == NULL) {
 				unsigned char r = (unsigned char)clamp_int(lroundf(material->diffuse[0] * 255.0f), 0, 255);
 				unsigned char g = (unsigned char)clamp_int(lroundf(material->diffuse[1] * 255.0f), 0, 255);
 				unsigned char b = (unsigned char)clamp_int(lroundf(material->diffuse[2] * 255.0f), 0, 255);
@@ -555,8 +557,8 @@ void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, material_t* materials, int
 void render_mesh(mesh_t* mesh, mat4 model_view_projection, mat3 normal_transfrom, mat4 model_view, rendering_ctx_t* ctx) {
 	timer_start(&ctx->timer);
 	clear_framebuffer_f(&ctx->depth_buffer, far_plane);
-	clear_framebuffer_u16(&ctx->output_buffer, convert_8r8g8b8a_to_5r6g5b(255, 0, 255));
-	clear_framebuffer_i32(&ctx->index_buffer, -1);
+	clear_framebuffer_u16(&ctx->output_buffer, (uint16_t)0);
+	clear_framebuffer_i32(&ctx->index_buffer, (int32_t)-1);
 	double clear_time = timer_elapsed_ms(&ctx->timer);
 	ctx->total_clear_time += clear_time;
 

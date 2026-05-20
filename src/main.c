@@ -1,4 +1,5 @@
 #define NUM_THREADS 4
+#define BUFFER_COUNT 3
 
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
@@ -149,8 +150,6 @@ int main() {
 		fprintf(stderr, "Unable to get window size\n");
 		return 1;
 	}
-	//cols = 80;
-	//rows = 45;
 	//printf("Window size: %d rows, %d cols\n", rows, cols);
 	rows *= 2;
 	rows *= 6;
@@ -168,27 +167,43 @@ int main() {
 	update_view_matrix(view_matrix);
 	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 
-	rendering_ctx_t render_ctx[NUM_THREADS];
-	sixel_display_ctx sixel_ctx[NUM_THREADS];
+	rendering_ctx_t render_ctx[BUFFER_COUNT][NUM_THREADS];
+	sixel_display_ctx sixel_ctx[BUFFER_COUNT][NUM_THREADS];
+
+	int front[NUM_THREADS];
+	int back[NUM_THREADS];
+	for (int i = 0;i < NUM_THREADS;i++) {
+		front[i] = 0;
+		back[i] = 0;
+	}
 
 	if (NUM_THREADS == 1) {
-		render_ctx[0] = create_rendering_ctx(cols, rows, 0, rows);
-		init_sixel_display_ctx(&sixel_ctx[0], cols, rows);
-		init_sixel_indexed_bitmap(&sixel_ctx[0].bitmap, cols, rows);
-		init_sixel_palette_rgbuniform(&sixel_ctx[0].bitmap.palette, 5);
+		render_ctx[0][0] = create_rendering_ctx(cols, rows, 0, rows);
+		init_sixel_display_ctx(&sixel_ctx[0][0], cols, rows);
+		init_sixel_indexed_bitmap(&sixel_ctx[0][0].bitmap, cols, rows);
+		init_sixel_palette_rgbuniform(&sixel_ctx[0][0].bitmap.palette, 5);
 	}
 	else {
-		for (int i = 1; i < NUM_THREADS; i++) {
-			int starty, endy;
-			starty = (rows * (i - 1)) / (NUM_THREADS - 1);
-			endy = (rows * ((i - 1) + 1)) / (NUM_THREADS - 1);
-			starty -= starty % 6;
-			endy -= endy % 6;
-			int rows_per_thread = endy - starty;
-			render_ctx[i - 1] = create_rendering_ctx(cols, rows, starty, endy);
-			init_sixel_display_ctx(&sixel_ctx[i - 1], cols, rows_per_thread);
-			init_sixel_indexed_bitmap(&sixel_ctx[i - 1].bitmap, cols, rows_per_thread);
-			init_sixel_palette_rgbuniform(&sixel_ctx[i - 1].bitmap.palette, 5);
+		for (int b = 0;b < BUFFER_COUNT;b++) {
+			for (int i = 1; i < NUM_THREADS; i++) {
+				int starty, endy;
+				starty = (rows * (i - 1)) / (NUM_THREADS - 1);
+				endy = (rows * ((i - 1) + 1)) / (NUM_THREADS - 1);
+				starty -= starty % 6;
+				endy -= endy % 6;
+				int rows_per_thread = endy - starty;
+				render_ctx[b][i - 1] = create_rendering_ctx(cols, rows, starty, endy);
+				init_sixel_display_ctx(&sixel_ctx[b][i - 1], cols, rows_per_thread);
+				init_sixel_indexed_bitmap(&sixel_ctx[b][i - 1].bitmap, cols, rows_per_thread);
+				init_sixel_palette_rgbuniform(&sixel_ctx[b][i - 1].bitmap.palette, 5);
+			}
+		}
+	}
+
+	omp_lock_t buffer_locks[BUFFER_COUNT][NUM_THREADS];
+	for (int b = 0;b < BUFFER_COUNT;b++) {
+		for (int i = 0; i < NUM_THREADS - 1; i++) {
+			omp_init_lock(&buffer_locks[b][i]);
 		}
 	}
 
@@ -196,11 +211,9 @@ int main() {
 	timer_start(&timer_whole);
 
 	double total_processing_time = 0.0;
-	double total_conversion_time = 0.0;
 	double total_display_time = 0.0;
 
 	double processing_time = 0.0;
-	double conversion_time = 0.0;
 	double display_time = 0.0;
 
 	double previous_end_time = timer_elapsed_ms(&timer_whole);
@@ -215,6 +228,21 @@ int main() {
 		int thread_id = omp_get_thread_num();
 		int num_frames = 500;
 		int num_frame_counter = num_frames;
+		if (thread_id >= 1) {
+			render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[thread_id - 1]][thread_id - 1]);
+			convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[thread_id - 1]][thread_id - 1].bitmap, render_ctx[back[thread_id - 1]][thread_id - 1].output_buffer);
+			generate_sixel_display_data(&sixel_ctx[back[thread_id - 1]][thread_id - 1]);
+			int old_back = back[thread_id - 1];
+			back[thread_id - 1] = (old_back + 1) % BUFFER_COUNT;
+			omp_set_lock(&buffer_locks[back[thread_id - 1]][thread_id - 1]);
+		}
+#pragma omp barrier
+		if (NUM_THREADS >= 2 && thread_id == 0) {
+			for (int i = 0;i < NUM_THREADS - 1;i++) {
+				omp_set_lock(&buffer_locks[front[i]][i]);
+			}
+		}
+#pragma omp barrier
 		while (num_frame_counter--) {
 			if (thread_id == 0)
 			{
@@ -262,54 +290,64 @@ int main() {
 					}
 				}
 			}
-			if (thread_id >= 1 || NUM_THREADS == 1) {
-				if (NUM_THREADS == 1) {
-					render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[0]);
-				}
-				else {
-					render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[thread_id - 1]);
-				}
+			if (NUM_THREADS == 1) {
+				render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[0]][0]);
 			}
-#pragma omp barrier
-			if (thread_id == 0) {
-				timer_start(&timer);
-			}
-			if (thread_id >= 1) {
-				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx[thread_id - 1].bitmap, render_ctx[thread_id - 1].output_buffer);
-				generate_sixel_display_data(&sixel_ctx[thread_id - 1]);
+			else if (thread_id >= 1) {
+				render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[thread_id - 1]][thread_id - 1]);
+				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[thread_id - 1]][thread_id - 1], render_ctx[back[thread_id - 1]][thread_id - 1].output_buffer);
+				generate_sixel_display_data(&sixel_ctx[back[thread_id - 1]][thread_id - 1]);
+				int old_back = back[thread_id - 1];
+				back[thread_id - 1] = (old_back + 1) % BUFFER_COUNT;
+				omp_set_lock(&buffer_locks[back[thread_id - 1]][thread_id - 1]);
+				omp_unset_lock(&buffer_locks[old_back][thread_id - 1]);
 			}
 			if (NUM_THREADS == 1) {
-				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx[0].bitmap, render_ctx[0].output_buffer);
-				generate_sixel_display_data(&sixel_ctx[0]);
+				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[0]][0], render_ctx[back[0]][0].output_buffer);
+				generate_sixel_display_data(&sixel_ctx[back[0]][0]);
 			}
-#pragma omp barrier
 			if (thread_id == 0) {
-				conversion_time = timer_elapsed_ms(&timer);
-				timer_start(&timer);
-				int footer_len = 3;
-				if (NUM_THREADS <= 2) {
-					if (tio_write(&tio_ctx, sixel_ctx[0].data, sixel_ctx[0].data_size) == -1) {
-						exit(-1);
-					}
+				display_time = 0.0;
+				if (NUM_THREADS == 1) {
+					timer_start(&timer);
+					tio_write(&tio_ctx, sixel_ctx[front[0]][0].data, sixel_ctx[front[0]][0].data_size);
+					display_time += timer_elapsed_ms(&timer);
 				}
-				else {
-					if (tio_write(&tio_ctx, sixel_ctx[0].data, sixel_ctx[0].data_size - footer_len) == -1) {
-						exit(-1);
-					}
+				if (NUM_THREADS == 2) {
+					timer_start(&timer);
+					tio_write(&tio_ctx, sixel_ctx[front[0]][0].data, sixel_ctx[front[0]][0].data_size);
+					display_time += timer_elapsed_ms(&timer);
+					int old_front = front[0];
+					front[0] = (old_front + 1) % BUFFER_COUNT;
+					omp_set_lock(&buffer_locks[front[0]][0]);
+					omp_unset_lock(&buffer_locks[old_front][0]);
+				}
+				else if (NUM_THREADS >= 3) {
+					int footer_len = 2;
+					timer_start(&timer);
+					tio_write(&tio_ctx, sixel_ctx[front[0]][0].data, sixel_ctx[front[0]][0].data_size - footer_len);
+					display_time += timer_elapsed_ms(&timer);
+					int old_front = front[0];
+					front[0] = (old_front + 1) % BUFFER_COUNT;
+					omp_set_lock(&buffer_locks[front[0]][0]);
+					omp_unset_lock(&buffer_locks[old_front][0]);
 					for (int i = 1; i < NUM_THREADS - 2; i++) {
-						if (tio_write(&tio_ctx, sixel_ctx[i].sixel_data, sixel_ctx[i].data_size - sixel_ctx[i].header_data_size - footer_len) == -1) {
-							exit(-1);
-						}
+						timer_start(&timer);
+						tio_write(&tio_ctx, sixel_ctx[front[i]][i].sixel_data, sixel_ctx[front[i]][i].sixel_data_size - footer_len);
+						display_time += timer_elapsed_ms(&timer);
+						old_front = front[i];
+						front[i] = (old_front + 1) % BUFFER_COUNT;
+						omp_set_lock(&buffer_locks[front[i]][i]);
+						omp_unset_lock(&buffer_locks[old_front][i]);
 					}
+					timer_start(&timer);
+					tio_write(&tio_ctx, sixel_ctx[front[NUM_THREADS - 2]][NUM_THREADS - 2].sixel_data, sixel_ctx[front[NUM_THREADS - 2]][NUM_THREADS - 2].sixel_data_size);
+					display_time += timer_elapsed_ms(&timer);
+					old_front = front[NUM_THREADS - 2];
+					front[NUM_THREADS - 2] = (old_front + 1) % BUFFER_COUNT;
+					omp_set_lock(&buffer_locks[front[NUM_THREADS - 2]][NUM_THREADS - 2]);
+					omp_unset_lock(&buffer_locks[old_front][NUM_THREADS - 2]);
 				}
-				if (NUM_THREADS >= 3) {
-					if (tio_write(&tio_ctx,
-						sixel_ctx[NUM_THREADS - 2].data + sixel_ctx[NUM_THREADS - 2].header_data_size,
-						sixel_ctx[NUM_THREADS - 2].data_size - sixel_ctx[NUM_THREADS - 2].header_data_size) == -1) {
-						exit(-1);
-					}
-				}
-				display_time = timer_elapsed_ms(&timer);
 				total_display_time += display_time;
 
 				current_end_time = timer_elapsed_ms(&timer_whole);
@@ -323,11 +361,10 @@ int main() {
 				printf("\x1b[H");    // Move cursor to home
 				printf("\r\n");
 				//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
-				printf("Screen size: %d rows, %d cols, %d pixels\n", rows, cols, rows * cols);
+				//printf("Screen size: %d rows, %d cols, %d pixels\n", rows, cols, rows * cols);
 				//printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
-				printf("Processing:    %0.2f\r\n", processing_time);
-				printf("Conversion:    %0.2f\r\n", conversion_time);
-				printf("Display:       %0.2f\r\n", display_time);
+				//printf("Processing:    %0.2f\r\n", processing_time);
+				//printf("Display:       %0.2f\r\n", display_time);
 				printf("Frame time:    %0.2f\r\n", frame_time);
 				fflush(stdout);
 			}
@@ -339,38 +376,55 @@ int main() {
 			printf("Total times:\r\n");
 			printf("Processing:    %0.2f\r\n", total_processing_time);
 			printf("Display:       %0.2f\r\n", total_display_time);
-			printf("Conversion:    %0.2f\r\n", total_conversion_time);
 			printf("Frame time:    %0.2f\r\n", total_frame_time);
 			printf("Average times:\r\n");
 			printf("Processing:    %0.2f\r\n", total_processing_time / (float)num_frames);
 			printf("Display:       %0.2f\r\n", total_display_time / (float)num_frames);
-			printf("Conversion:    %0.2f\r\n", total_conversion_time / (float)num_frames);
 			printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
 		}
 	}
 
 #pragma omp barrier
-	double total_clear_time = render_ctx[0].total_clear_time;
-	double total_rasterisation_time = render_ctx[0].total_rasterisation_time;
-	double total_texture_sampling_time = render_ctx[0].total_texture_sampling_time;
+	double whole_time = timer_elapsed_ms(&timer_whole);
 
-	for (int i = 1; i < NUM_THREADS - 1; i++) {
-		total_clear_time += render_ctx[i].total_clear_time;
-		total_rasterisation_time += render_ctx[i].total_rasterisation_time;
-		total_texture_sampling_time += render_ctx[i].total_texture_sampling_time;
+	double total_clear_time = render_ctx[0][0].total_clear_time;
+	double total_rasterisation_time = render_ctx[0][0].total_rasterisation_time;
+	double total_texture_sampling_time = render_ctx[0][0].total_texture_sampling_time;
+	double total_generation_time = sixel_ctx[0][0].total_generation_time;
+	double total_conversion_time = sixel_ctx[0][0].total_conversion_time;
+	for (int b = 0;b < BUFFER_COUNT;b++) {
+		for (int i = 0; i < NUM_THREADS - 1; i++) {
+			if (b == 0 && i == 0)continue;
+			total_clear_time += render_ctx[b][i].total_clear_time;
+			total_rasterisation_time += render_ctx[b][i].total_rasterisation_time;
+			total_texture_sampling_time += render_ctx[b][i].total_texture_sampling_time;
+			total_generation_time += sixel_ctx[b][i].total_generation_time;
+			total_conversion_time += sixel_ctx[b][i].total_conversion_time;
+		}
 	}
+
+	double total_frame_gen_time =
+		total_clear_time +
+		total_rasterisation_time +
+		total_texture_sampling_time +
+		total_generation_time +
+		total_conversion_time;
+	double unaccounted_time = whole_time - total_frame_gen_time - total_display_time;
 
 	printf("total_clear_time:            %0.2f\r\n", total_clear_time);
 	printf("total_rasterisation_time:    %0.2f\r\n", total_rasterisation_time);
 	printf("total_texture_sampling_time: %0.2f\r\n", total_texture_sampling_time);
+	printf("total_conversion_time:       %0.2f\r\n", total_conversion_time);
+	printf("total_generation_time:       %0.2f\r\n", total_generation_time);
+	printf("total_frame_gen_time:        %0.2f\r\n", total_frame_gen_time);
+	printf("total_display_time:          %0.2f\r\n", total_display_time);
+	printf("Total time for %d frames:    %0.2f ms\r\n", 500, whole_time);
+	printf("unaccounted_time:            %0.2f\r\n", unaccounted_time);
 
 	fflush(stdout);
-	tinyobj_attrib_free(&(mesh.attrib));
-	tinyobj_shapes_free(mesh.shapes, mesh.num_shapes);
+	//tinyobj_attrib_free(&(mesh.attrib));
+	//tinyobj_shapes_free(mesh.shapes, mesh.num_shapes);
 
-
-	double whole_time = timer_elapsed_ms(&timer_whole);
-	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_time);
 	printf("\x1b[?25h"); // Show cursor
 	fflush(stdout);
 
