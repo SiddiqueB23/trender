@@ -4,6 +4,7 @@
 #include "cglm/cglm.h"
 #include "rainbow.h"
 #include <utils.h>
+#include <omp.h>
 
 tio_ctx_t ctx;
 
@@ -139,7 +140,7 @@ int main() {
 
 	end:
 
-#pragma omp barrier
+// #pragma omp barrier
 		if (thread_id == 0) {
 			printf("\r\n");
 			printf("Total times:\r\n");

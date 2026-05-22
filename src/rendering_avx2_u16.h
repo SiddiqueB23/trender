@@ -267,8 +267,35 @@ float get_processed_triangle_area(processed_triangle_t triangle, int width, int 
 //	__m256 rem_f = _mm256_sub_ps(fa, prod);
 //
 //	return _mm256_cvttps_epi32(rem_f);
+//}//
+//static inline __m256i _mm256_div_epi16(__m256i a, __m256i b) {
+//	// Split 16 int16s into two groups of 8, convert to int32, divide, and pack back
+//	
+//	// Lower 8 int16s → int32s
+//	__m256i a_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(a));
+//	__m256i b_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(b));
+//	
+//	// Upper 8 int16s → int32s (extract upper 128 bits first)
+//	__m256i a_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(a, 1));
+//	__m256i b_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(b, 1));
+//	
+//	// Convert to float and divide
+//	__m256 fa_lo = _mm256_cvtepi32_ps(a_lo);
+//	__m256 fb_lo = _mm256_cvtepi32_ps(b_lo);
+//	__m256 fa_hi = _mm256_cvtepi32_ps(a_hi);
+//	__m256 fb_hi = _mm256_cvtepi32_ps(b_hi);
+//	
+//	// Divide and truncate toward zero
+//	__m256 q_lo = _mm256_round_ps(_mm256_div_ps(fa_lo, fb_lo), _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+//	__m256 q_hi = _mm256_round_ps(_mm256_div_ps(fa_hi, fb_hi), _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+//	
+//	// Convert back to int32
+//	__m256i res_lo = _mm256_cvttps_epi32(q_lo);
+//	__m256i res_hi = _mm256_cvttps_epi32(q_hi);
+//	
+//	// Pack back to int16 (saturate overflow to int16 range)
+//	return _mm256_packs_epi32(res_lo, res_hi);
 //}
-
 static inline __m256i modulo_int_avx2(__m256i x, int modulus) {
 	__m256i mod = _mm256_set1_epi32(modulus);
 	__m256i result = _mm256_rem_epi32(x, mod);

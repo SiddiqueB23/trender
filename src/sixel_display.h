@@ -432,7 +432,7 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 		int bayer_y = y % 16;
 		__m256i t_divby5_vec = bayer_16x16_divby5_vec[bayer_y];
 		for (int x = 0; x < img_x; x += 16) {
-			__m256i color_vec = _mm256_loadu_epi16(image_data_ptr);
+			__m256i color_vec = _mm256_loadu_si256((__m256i*)image_data_ptr);
 			__m256i r_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 11), bitmask5_vec);
 			__m256i g_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 5), bitmask6_vec);
 			__m256i b_vec = _mm256_and_si256(color_vec, bitmask5_vec);
@@ -510,7 +510,7 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 		for (int x = 0; x < img_x; x += 32) {
 			__m256i color_num_vecs[2];
 			for (int i = 0;i < 2;i++) {
-				__m256i color_vec = _mm256_loadu_epi16(image_data_ptr);
+				__m256i color_vec = _mm256_load_si256((__m256i*)image_data_ptr);
 				__m256i r_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 11), bitmask5_vec);
 				__m256i g_vec = _mm256_and_si256(_mm256_srli_epi16(color_vec, 5), bitmask6_vec);
 				__m256i b_vec = _mm256_and_si256(color_vec, bitmask5_vec);

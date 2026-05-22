@@ -207,7 +207,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 				&(loaded_materials[i].diffuse_texture.height), 
 				&(loaded_materials[i].diffuse_texture.color_size), 4);
 			if (loaded_materials[i].diffuse_texture.data == NULL) {
-				fprintf(stderr, "Failed to load texture image\nFilepath: %s", texture_path);
+				fprintf(stderr, "Failed to load texture image\nFilepath: %s\r\n", texture_path);
 				return -1;
 			}
 			//printf("Loaded texture image: %s, Material ID: %d\n", texture_path, i);
@@ -225,7 +225,7 @@ int load_obj(char* obj_path, mesh_t* mesh) {
 	tinyobj_material_t* materials = NULL;
 	int ret = load_mesh(obj_path, &(mesh->attrib), &(mesh->shapes), &(mesh->num_shapes), &materials, &(mesh->num_materials));
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s", ret, obj_path);
+		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s\r\n", ret, obj_path);
 		return 1;
 	}
 	mesh->start_triangle_index = 0;
@@ -235,7 +235,7 @@ int load_obj(char* obj_path, mesh_t* mesh) {
 	get_dirname(obj_path, texture_dir_path);
 	ret = load_materials(materials, mesh->num_materials, mesh->materials, texture_dir_path);
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load materials: %d\nFilepath: %s", ret, obj_path);
+		fprintf(stderr, "Failed to load materials: %d\nFilepath: %s\r\n", ret, obj_path);
 		return 1;
 	}
 	tinyobj_materials_free(materials, mesh->num_materials);

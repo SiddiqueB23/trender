@@ -11,9 +11,6 @@
 #include "timer.h"
 #include "textures.h"
 #include "omp.h"
-#ifndef NUM_THREADS
-#define NUM_THREADS 3
-#endif
 
 float near_plane = 1.0f;
 float far_plane = 100.0f;
@@ -294,22 +291,6 @@ float get_processed_triangle_area(processed_triangle_t triangle, int width, int 
 	viewport_transform(&triangle.v2, width, height, &x2, &y2);
 	return 0.5f * fabsf(x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1));
 }
-
-//static inline __m256i _mm256_rem_epi32(__m256i a, __m256i b) {
-//	// Convert int32 → float (exact for values within float's 24-bit mantissa)
-//	__m256 fa = _mm256_cvtepi32_ps(a);
-//	__m256 fb = _mm256_cvtepi32_ps(b);
-//
-//	// Divide and truncate toward zero (matches C integer division semantics)
-//	__m256 quotient = _mm256_div_ps(fa, fb);
-//	__m256 truncated = _mm256_round_ps(quotient, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
-//
-//	// remainder = a - trunc(a/b) * b
-//	__m256 prod = _mm256_mul_ps(truncated, fb);
-//	__m256 rem_f = _mm256_sub_ps(fa, prod);
-//
-//	return _mm256_cvttps_epi32(rem_f);
-//}
 
 static inline __m256i modulo_int_avx2(__m256i x, int modulus) {
 	__m256i mod = _mm256_set1_epi32(modulus);

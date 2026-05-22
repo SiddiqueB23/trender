@@ -11,6 +11,8 @@
 #include "tio.h"
 #include <math.h>
 #include <stdlib.h>
+#include <omp.h>
+#include <stdatomic.h>
 
 //#define RESOURCES_PATH "../resources/"
 
@@ -121,6 +123,19 @@ int compare_uint64_t(const void* a, const void* b) {
 	else return 0;
 }
 
+atomic_int keep_running = 1;
+
+static inline void set_lock_with_debug(omp_lock_t* lock, int thread_id, int buffer_id1, int buffer_id2) {
+	// printf("\x1b[33mThread %d waiting for lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
+	omp_set_lock(lock);
+	// printf("\x1b[32mThread %d acquired lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
+}
+
+static inline void unset_lock_with_debug(omp_lock_t* lock, int thread_id, int buffer_id1, int buffer_id2) {
+	// printf("\x1b[31mThread %d releasing lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
+	omp_unset_lock(lock);
+}
+
 int main() {
 
 	tio_init(&tio_ctx);
@@ -130,12 +145,12 @@ int main() {
 	printf("\x1b[?25l"); // Hide cursor
 	fflush(stdout);
 
-	//char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
+	// char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
 	char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
 	mesh_t mesh;
 	int ret = load_obj(obj_path, &mesh);
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s", ret, obj_path);
+		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s\r\n", ret, obj_path);
 		return 1;
 	}
 
@@ -152,8 +167,10 @@ int main() {
 	}
 	//printf("Window size: %d rows, %d cols\n", rows, cols);
 	rows *= 2;
-	rows *= 6;
-	cols *= 6;
+	rows *= 5;
+	cols *= 5;
+	rows = 540;
+	cols = 960;
 	rows -= rows % 6;
 	cols -= cols % 8;
 
@@ -230,20 +247,20 @@ int main() {
 		int num_frame_counter = num_frames;
 		if (thread_id >= 1) {
 			render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[thread_id - 1]][thread_id - 1]);
-			convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[thread_id - 1]][thread_id - 1].bitmap, render_ctx[back[thread_id - 1]][thread_id - 1].output_buffer);
+			convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx[back[thread_id - 1]][thread_id - 1], render_ctx[back[thread_id - 1]][thread_id - 1].output_buffer);
 			generate_sixel_display_data(&sixel_ctx[back[thread_id - 1]][thread_id - 1]);
 			int old_back = back[thread_id - 1];
 			back[thread_id - 1] = (old_back + 1) % BUFFER_COUNT;
-			omp_set_lock(&buffer_locks[back[thread_id - 1]][thread_id - 1]);
+			set_lock_with_debug(&buffer_locks[back[thread_id - 1]][thread_id - 1], thread_id, back[thread_id - 1], thread_id - 1);
 		}
 #pragma omp barrier
 		if (NUM_THREADS >= 2 && thread_id == 0) {
 			for (int i = 0;i < NUM_THREADS - 1;i++) {
-				omp_set_lock(&buffer_locks[front[i]][i]);
+				set_lock_with_debug(&buffer_locks[front[i]][i], thread_id, front[i], i);
 			}
 		}
 #pragma omp barrier
-		while (num_frame_counter--) {
+		while (num_frames-- && atomic_load(&keep_running)) {
 			if (thread_id == 0)
 			{
 				int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
@@ -254,7 +271,8 @@ int main() {
 					event_bytes_processed += bytes_processed;
 					if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
 						if (event.code == 'Q' || event.code == CTRL_Q) {
-							exit(-1);
+							atomic_store(&keep_running, 0);
+							break;
 						}
 						switch (event.code) {
 						case 'w':
@@ -299,8 +317,8 @@ int main() {
 				generate_sixel_display_data(&sixel_ctx[back[thread_id - 1]][thread_id - 1]);
 				int old_back = back[thread_id - 1];
 				back[thread_id - 1] = (old_back + 1) % BUFFER_COUNT;
-				omp_set_lock(&buffer_locks[back[thread_id - 1]][thread_id - 1]);
-				omp_unset_lock(&buffer_locks[old_back][thread_id - 1]);
+				set_lock_with_debug(&buffer_locks[back[thread_id - 1]][thread_id - 1], thread_id, back[thread_id - 1], thread_id - 1);
+				unset_lock_with_debug(&buffer_locks[old_back][thread_id - 1], thread_id, old_back, thread_id - 1);
 			}
 			if (NUM_THREADS == 1) {
 				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[0]][0], render_ctx[back[0]][0].output_buffer);
@@ -319,8 +337,8 @@ int main() {
 					display_time += timer_elapsed_ms(&timer);
 					int old_front = front[0];
 					front[0] = (old_front + 1) % BUFFER_COUNT;
-					omp_set_lock(&buffer_locks[front[0]][0]);
-					omp_unset_lock(&buffer_locks[old_front][0]);
+					set_lock_with_debug(&buffer_locks[front[0]][0], thread_id, front[0], 0);
+					unset_lock_with_debug(&buffer_locks[old_front][0], thread_id, old_front, 0);
 				}
 				else if (NUM_THREADS >= 3) {
 					int footer_len = 2;
@@ -329,24 +347,24 @@ int main() {
 					display_time += timer_elapsed_ms(&timer);
 					int old_front = front[0];
 					front[0] = (old_front + 1) % BUFFER_COUNT;
-					omp_set_lock(&buffer_locks[front[0]][0]);
-					omp_unset_lock(&buffer_locks[old_front][0]);
+					set_lock_with_debug(&buffer_locks[front[0]][0], thread_id, front[0], 0);
+					unset_lock_with_debug(&buffer_locks[old_front][0], thread_id, old_front, 0);
 					for (int i = 1; i < NUM_THREADS - 2; i++) {
 						timer_start(&timer);
 						tio_write(&tio_ctx, sixel_ctx[front[i]][i].sixel_data, sixel_ctx[front[i]][i].sixel_data_size - footer_len);
 						display_time += timer_elapsed_ms(&timer);
 						old_front = front[i];
 						front[i] = (old_front + 1) % BUFFER_COUNT;
-						omp_set_lock(&buffer_locks[front[i]][i]);
-						omp_unset_lock(&buffer_locks[old_front][i]);
+						set_lock_with_debug(&buffer_locks[front[i]][i], thread_id, front[i], i);
+						unset_lock_with_debug(&buffer_locks[old_front][i], thread_id, old_front, i);
 					}
 					timer_start(&timer);
 					tio_write(&tio_ctx, sixel_ctx[front[NUM_THREADS - 2]][NUM_THREADS - 2].sixel_data, sixel_ctx[front[NUM_THREADS - 2]][NUM_THREADS - 2].sixel_data_size);
 					display_time += timer_elapsed_ms(&timer);
 					old_front = front[NUM_THREADS - 2];
 					front[NUM_THREADS - 2] = (old_front + 1) % BUFFER_COUNT;
-					omp_set_lock(&buffer_locks[front[NUM_THREADS - 2]][NUM_THREADS - 2]);
-					omp_unset_lock(&buffer_locks[old_front][NUM_THREADS - 2]);
+					set_lock_with_debug(&buffer_locks[front[NUM_THREADS - 2]][NUM_THREADS - 2], thread_id, front[NUM_THREADS - 2], NUM_THREADS - 2);
+					unset_lock_with_debug(&buffer_locks[old_front][NUM_THREADS - 2], thread_id, old_front, NUM_THREADS - 2);
 				}
 				total_display_time += display_time;
 
@@ -361,17 +379,26 @@ int main() {
 				printf("\x1b[H");    // Move cursor to home
 				printf("\r\n");
 				//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
-				//printf("Screen size: %d rows, %d cols, %d pixels\n", rows, cols, rows * cols);
+				printf("Screen size: %d rows, %d cols, %d pixels\r\n", rows, cols, rows * cols);
 				//printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
-				//printf("Processing:    %0.2f\r\n", processing_time);
-				//printf("Display:       %0.2f\r\n", display_time);
+				printf("Processing:    %0.2f\r\n", processing_time);
+				printf("Display:       %0.2f\r\n", display_time);
 				printf("Frame time:    %0.2f\r\n", frame_time);
 				fflush(stdout);
 			}
 		}
-
-		//end:
 		if (thread_id == 0) {
+			atomic_store(&keep_running, 0);
+			if (NUM_THREADS == 2) {
+				unset_lock_with_debug(&buffer_locks[front[0]][0], 0, front[0], 0);
+			}
+			else if (NUM_THREADS >= 3) {
+				unset_lock_with_debug(&buffer_locks[front[0]][0], 0, front[0], 0);
+				for (int i = 1; i < NUM_THREADS - 2; i++) {
+					unset_lock_with_debug(&buffer_locks[front[i]][i], 0, front[i], i);
+				}
+				unset_lock_with_debug(&buffer_locks[front[NUM_THREADS - 2]][NUM_THREADS - 2], 0, front[NUM_THREADS - 2], NUM_THREADS - 2);
+			}
 			printf("\r\n");
 			printf("Total times:\r\n");
 			printf("Processing:    %0.2f\r\n", total_processing_time);
@@ -382,9 +409,15 @@ int main() {
 			printf("Display:       %0.2f\r\n", total_display_time / (float)num_frames);
 			printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
 		}
+		
+		if (NUM_THREADS >= 2 && thread_id >= 1) {
+			unset_lock_with_debug(&buffer_locks[back[thread_id - 1]][thread_id - 1], thread_id, back[thread_id - 1], thread_id - 1);
+		}
+		printf("%d exited loop\r\n", thread_id);
+		fflush(stdout);
 	}
 
-#pragma omp barrier
+	printf("All threads joined\r\n");
 	double whole_time = timer_elapsed_ms(&timer_whole);
 
 	double total_clear_time = render_ctx[0][0].total_clear_time;
