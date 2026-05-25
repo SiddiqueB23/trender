@@ -23,7 +23,7 @@ static inline int modulo_int(int a, int b) {
 	return ((a % b) + b) % b;
 }
 
-#if defined(__linux__)
+#if defined(__gcc__) || defined(__clang__)
 #include <immintrin.h>
 static inline __m256i _mm256_rem_epi32(__m256i a, __m256i b) {
 	// Convert int32 → float (exact for values within float's 24-bit mantissa)

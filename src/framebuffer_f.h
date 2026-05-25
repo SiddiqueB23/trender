@@ -15,7 +15,7 @@ framebuffer_f create_framebuffer_f(int width, int height) {
 	framebuffer_f fb;
 	fb.width = width;
 	fb.height = height;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 	fb.data = (float*)aligned_alloc(32, width * height * sizeof(float)); // 32-byte aligned for AVX
 #endif
 #if defined(_WIN32)

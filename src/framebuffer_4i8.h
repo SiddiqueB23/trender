@@ -14,13 +14,13 @@ framebuffer_4i8 create_framebuffer_4i8(int width, int height) {
     framebuffer_4i8 fb;
     fb.width = width;
     fb.height = height;
-//#if defined(__linux__)
-//    fb.data = (float*)aligned_alloc(32, width * height * 4); // 32-byte aligned for AVX
-//#endif
-//#if defined(_WIN32)
+#if defined(__linux__) || defined(__APPLE__)
+   fb.data = (unsigned char*)aligned_alloc(32, width * height * 4); // 32-byte aligned for AVX
+#endif
+#if defined(_WIN32)
     fb.data = (unsigned char*)malloc(width * height * 4);
-    //fb.data = (float *)_aligned_malloc(width * height * 4, 32); // 32-byte aligned for AVX
-//#endif
+    //fb.data = (unsigned char*)_aligned_malloc(width * height * 4, 32); // 32-byte aligned for AVX
+#endif
     if (fb.data == NULL) {
         fprintf(stderr, "Failed to allocate memory for framebuffer\n");
         exit(1);

@@ -61,10 +61,12 @@ int main() {
 	cols *= 8;
 	printf("Window size: %d rows, %d cols\n", rows, cols);
 
+	sixel_indexed_bitmap bitmap;
+	init_sixel_indexed_bitmap(&bitmap, cols, rows);
+	init_sixel_palette_rgbuniform(&bitmap.palette, 5);
 	sixel_display_ctx sixel_ctx;
 	init_sixel_display_ctx(&sixel_ctx, cols, rows);
-	init_sixel_indexed_bitmap(&sixel_ctx.bitmap, cols, rows);
-	init_sixel_palette_rgbuniform(&sixel_ctx.bitmap.palette, 5);
+	sixel_ctx.bitmap = &bitmap;
 
 	monotonic_timer_t timer, timer_whole;
 	timer_start(&timer_whole);
@@ -74,9 +76,9 @@ int main() {
 		//fflush(stdout);
 
 		timer_start(&timer);
-		//random_bitmap(&sixel_ctx.bitmap);
-		random_squares_bitmap(&sixel_ctx.bitmap, 1);
-		//checkered_bitmap(&sixel_ctx.bitmap, 3, 50, 200);
+		//random_bitmap(sixel_ctx.bitmap);
+		random_squares_bitmap(sixel_ctx.bitmap, 1);
+		//checkered_bitmap(sixel_ctx.bitmap, 3, 50, 200);
 		double randomization_elapsed_ms = timer_elapsed_ms(&timer);
 
 		timer_start(&timer);

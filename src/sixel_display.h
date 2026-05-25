@@ -304,7 +304,7 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2
 typedef uint64_t sixel_column_t;
 
 typedef struct {
-	sixel_indexed_bitmap bitmap;
+	sixel_indexed_bitmap* bitmap;
 	char* data;
 	char* header_data;
 	char* sixel_data;
@@ -315,13 +315,16 @@ typedef struct {
 	double total_generation_time;
 	double total_conversion_time;
 	monotonic_timer_t timer;
+	int scale_x, scale_y;
 	int painted[2048];
 	sixel_column_t transposed[2048];
 } sixel_display_ctx;
 
 void init_sixel_display_ctx(sixel_display_ctx* ctx, int width, int height) {
-	init_sixel_indexed_bitmap(&ctx->bitmap, width, height);
-	ctx->data = (char*)malloc((width * height * 8) + 1024);
+	ctx->scale_x = 1;
+	ctx->scale_y = 1;
+	ctx->bitmap = NULL;
+	ctx->data = (char*)malloc((width * height * 8 * ctx->scale_y) + 1024);
 	ctx->header_data = ctx->data;
 	ctx->sixel_data = NULL;
 	ctx->header_valid = 0;
@@ -339,7 +342,7 @@ void free_sixel_display_ctx(sixel_display_ctx* ctx) {
 }
 
 void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_display_ctx* ctx, framebuffer_u16 fb) {
-	sixel_indexed_bitmap* bitmap = &ctx->bitmap;
+	sixel_indexed_bitmap* bitmap = ctx->bitmap;
 	timer_start(&ctx->timer);
 	int img_x = fb.width, img_y = fb.height, img_n = 1;
 	const int num_steps = 5;
@@ -395,7 +398,7 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 //};
 
 void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
-	sixel_indexed_bitmap* bitmap = &ctx->bitmap;
+	sixel_indexed_bitmap* bitmap = ctx->bitmap;
 	timer_start(&ctx->timer);
 	int img_x = fb.width, img_y = fb.height, img_n = 1;
 	uint16_t* image_data_ptr = fb.data;
@@ -471,7 +474,7 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 
 
 void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
-	sixel_indexed_bitmap* bitmap = &ctx->bitmap;
+	sixel_indexed_bitmap* bitmap = ctx->bitmap;
 	timer_start(&ctx->timer);
 	int img_x = fb.width, img_y = fb.height, img_n = 1;
 	uint16_t* image_data_ptr = fb.data;
@@ -677,7 +680,7 @@ static inline char* encode_sixel_data_carriage_return(char* buffer) {
 static inline char* encode_sixel_row(sixel_display_ctx* ctx, char* buffer, int y_start, int width, int height) {
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
-			int color_num = ctx->bitmap.index_data[(y_start + y) * ctx->bitmap.width + x];
+			int color_num = ctx->bitmap->index_data[(y_start + y) * ctx->bitmap->width + x];
 			buffer = encode_sixel_data_set_color(buffer, color_num);
 			buffer = encode_sixel_data_character(buffer, 1 << y);
 		}
@@ -689,7 +692,7 @@ static inline char* encode_sixel_row(sixel_display_ctx* ctx, char* buffer, int y
 static inline int get_color_mask_for_column(sixel_display_ctx* ctx, int x, int y_start, int height, int search_color) {
 	int mask = 0;
 	for (int y = 0; y < height; y++) {
-		int color_num = ctx->bitmap.index_data[(y_start + y) * ctx->bitmap.width + x];
+		int color_num = ctx->bitmap->index_data[(y_start + y) * ctx->bitmap->width + x];
 		if (color_num == search_color) {
 			mask |= (1 << y);
 		}
@@ -701,7 +704,7 @@ static inline char* encode_sixel_row_alt(sixel_display_ctx* ctx, char* buffer, i
 	static uint8_t painted[2048];
 	for (int i = 0; i < 2048 && i < width; i++)
 		painted[i] = 0;
-	int current_color = ctx->bitmap.index_data[(y_start)*ctx->bitmap.width];
+	int current_color = ctx->bitmap->index_data[(y_start)*ctx->bitmap->width];
 	int lookahead = 4;
 	int x = 0;
 	buffer = encode_sixel_data_set_color(buffer, current_color);
@@ -735,7 +738,7 @@ static inline char* encode_sixel_row_alt(sixel_display_ctx* ctx, char* buffer, i
 					endx = x;
 					for (int j = 0; j < height; j++) {
 						if (((~painted[i]) & (1 << j)) != 0) {
-							current_color = ctx->bitmap.index_data[(y_start + j) * ctx->bitmap.width + i];
+							current_color = ctx->bitmap->index_data[(y_start + j) * ctx->bitmap->width + i];
 							break;
 						}
 					}
@@ -800,20 +803,27 @@ static inline int get_color_mask_for_column_opt(sixel_column_t* transposed, int 
 	return mask_alt;
 }
 
+static inline void transpose_bitmap_to_columns(sixel_display_ctx* ctx, int y_start, int width, int height, int offset) {
+	sixel_column_t* transposed = ctx->transposed;
+	int scale_y = ctx->scale_y;
+	for (int i = 0; i < 2048 && i < width; i++) {
+		sixel_column_t packed = 0;
+		for (int j = 0; j < height; j++) {
+			int y = (j + offset*6)/scale_y;
+			y = clamp_int(y, 0, height - 1);
+			int color_num = ctx->bitmap->index_data[(y_start + y) * ctx->bitmap->width + i];
+			packed |= ((sixel_column_t)color_num << (j * 8));
+		}
+		transposed[i] = packed;
+	}
+}
+
 static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffer, int y_start, int width, int height) {
 	int* painted = ctx->painted;
 	for (int i = 0; i < 2048 && i < width; i++)
 		painted[i] = 0;
 	sixel_column_t* transposed = ctx->transposed;
-	for (int i = 0; i < 2048 && i < width; i++) {
-		sixel_column_t packed = 0;
-		for (int j = 0; j < height; j++) {
-			int color_num = ctx->bitmap.index_data[(y_start + j) * ctx->bitmap.width + i];
-			packed |= ((sixel_column_t)color_num << (j * 8));
-		}
-		transposed[i] = packed;
-	}
-	int current_color = ctx->bitmap.index_data[(y_start)*ctx->bitmap.width];
+	int current_color = transposed[0] & 0xFF;
 	sixel_column_t packed_color = (sixel_column_t)current_color * LSB_SET_EACH_BYTE;
 	int lookahead = 4;
 	int x = 0;
@@ -824,6 +834,8 @@ static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffe
 	}
 	int startx = x;
 	int endx = x;
+	int scale_x = ctx->scale_x;
+	int scale_y = ctx->scale_y;
 	while (1) {
 		int current_mask = 0;
 		int painted_mask = 0;
@@ -832,7 +844,7 @@ static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffe
 			current_mask &= ~painted[i];
 			if (current_mask != 0) {
 
-				buffer = encode_sixel_data_character_repeated(buffer, 0, i - x);
+				buffer = encode_sixel_data_character_repeated(buffer, 0, (i - x)*scale_x);
 				x = i;
 				startx = x;
 				endx = x;
@@ -842,13 +854,13 @@ static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffe
 		if (current_mask == 0) {
 			for (int i = x; i < width; i++) {
 				if (painted[i] != full_column) {
-					buffer = encode_sixel_data_character_repeated(buffer, 0, i - x);
+					buffer = encode_sixel_data_character_repeated(buffer, 0, (i - x)*scale_x);
 					x = i;
 					startx = x;
 					endx = x;
 					for (int j = 0; j < height; j++) {
 						if (((~painted[i]) & (1 << j)) != 0) {
-							current_color = ctx->bitmap.index_data[(y_start + j) * ctx->bitmap.width + i];
+							current_color = ((transposed[i] >> (j * 8)) & 0xFF);
 							break;
 						}
 					}
@@ -882,7 +894,7 @@ static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffe
 				break;
 			}
 		}
-		buffer = encode_sixel_data_character_repeated(buffer, current_mask, endx - startx + 1);
+		buffer = encode_sixel_data_character_repeated(buffer, current_mask, (endx - startx + 1) * scale_x);
 		x = endx + 1;
 		if (x == width) {
 			buffer = encode_sixel_data_carriage_return(buffer);
@@ -900,8 +912,8 @@ void generate_sixel_display_data(sixel_display_ctx* ctx) {
 		palette_ptr += sprintf(palette_ptr, "\x1b[H");
 		palette_ptr = encode_sixel_data_header(palette_ptr);
 
-		for (int i = 0; i < ctx->bitmap.palette.size; i++) {
-			palette_ptr = encode_sixel_data_modify_color(palette_ptr, i, ctx->bitmap.palette.color_type, ctx->bitmap.palette.colors[i]);
+		for (int i = 0; i < ctx->bitmap->palette.size; i++) {
+			palette_ptr = encode_sixel_data_modify_color(palette_ptr, i, ctx->bitmap->palette.color_type, ctx->bitmap->palette.colors[i]);
 		}
 
 		ctx->header_data_size = palette_ptr - ctx->header_data; // Store the final length
@@ -915,12 +927,13 @@ void generate_sixel_display_data(sixel_display_ctx* ctx) {
 	ctx->sixel_data_size = 0;
 	buffer_ptr = encode_sixel_data_carriage_return(buffer_ptr);
 
-	for (int row_start = 0; row_start < ctx->bitmap.height; row_start += 6) {
-		int row_height = (row_start + 6 <= ctx->bitmap.height) ? 6 : (ctx->bitmap.height - row_start);
-		//buffer_ptr = encode_sixel_row(ctx, buffer_ptr, row_start, ctx->bitmap.width, row_height);
-		//buffer_ptr = encode_sixel_row_alt(ctx, buffer_ptr, row_start, ctx->bitmap.width, row_height);
-		buffer_ptr = encode_sixel_row_alt_opt(ctx, buffer_ptr, row_start, ctx->bitmap.width, row_height);
-		buffer_ptr = encode_sixel_data_new_line(buffer_ptr);
+	for (int row_start = 0; row_start < ctx->bitmap->height; row_start += 6) {
+		int row_height = (row_start + 6 <= ctx->bitmap->height) ? 6 : (ctx->bitmap->height - row_start);
+		for(int offset = 0; offset < ctx->scale_y; offset++) {
+			transpose_bitmap_to_columns(ctx, row_start, ctx->bitmap->width, row_height, offset);
+			buffer_ptr = encode_sixel_row_alt_opt(ctx, buffer_ptr, row_start, ctx->bitmap->width, row_height);
+			buffer_ptr = encode_sixel_data_new_line(buffer_ptr);
+		}
 	}
 
 	// Append Sixel terminator to the pixel buffer

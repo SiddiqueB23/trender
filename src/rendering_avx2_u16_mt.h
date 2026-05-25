@@ -60,6 +60,7 @@ rendering_ctx_t create_rendering_ctx(int width, int height, int starty, int endy
 	ctx.total_clear_time = 0.0;
 	ctx.total_rasterisation_time = 0.0;
 	ctx.total_texture_sampling_time = 0.0;
+	printf("****\r\n");fflush(stdout);
 	return ctx;
 }
 

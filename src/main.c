@@ -1,17 +1,9 @@
-#define NUM_THREADS 4
-#define BUFFER_COUNT 3
-
+#include "trender.h"
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
-#include "mesh_loading.h"
 #include "raycast.h"
-#include "rendering_avx2_u16_mt.h"
-#include "sixel_display.h"
-#include "timer.h"
-#include "tio.h"
 #include <math.h>
 #include <stdlib.h>
-#include <omp.h>
 #include <stdatomic.h>
 
 //#define RESOURCES_PATH "../resources/"
@@ -125,17 +117,6 @@ int compare_uint64_t(const void* a, const void* b) {
 
 atomic_int keep_running = 1;
 
-static inline void set_lock_with_debug(omp_lock_t* lock, int thread_id, int buffer_id1, int buffer_id2) {
-	// printf("\x1b[33mThread %d waiting for lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
-	omp_set_lock(lock);
-	// printf("\x1b[32mThread %d acquired lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
-}
-
-static inline void unset_lock_with_debug(omp_lock_t* lock, int thread_id, int buffer_id1, int buffer_id2) {
-	// printf("\x1b[31mThread %d releasing lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
-	omp_unset_lock(lock);
-}
-
 int main() {
 
 	tio_init(&tio_ctx);
@@ -157,15 +138,15 @@ int main() {
 	//print_material_info(mesh.materials, mesh.num_materials);
 	for (int i = 0; i < mesh.num_materials; i++) {
 		if (mesh.materials[i].diffuse_texture.data != NULL)
-			convert_8r8g8b8a_to_5r6g5b_texture(&mesh.materials[i].diffuse_texture);
+		convert_8r8g8b8a_to_5r6g5b_texture(&mesh.materials[i].diffuse_texture);
 	}
 
-	int rows, cols;
+	int rows = 0, cols = 0;
 	if (tio_get_window_size(&tio_ctx, &rows, &cols) == -1) {
 		fprintf(stderr, "Unable to get window size\n");
 		return 1;
 	}
-	//printf("Window size: %d rows, %d cols\n", rows, cols);
+	printf("Window size: %d rows, %d cols\n", rows, cols);
 	rows *= 2;
 	rows *= 5;
 	cols *= 5;
@@ -184,55 +165,14 @@ int main() {
 	update_view_matrix(view_matrix);
 	update_matrices(model_matrix, view_matrix, projection_matrix, model_view, model_view_projection, normal_matrix);
 
-	rendering_ctx_t render_ctx[BUFFER_COUNT][NUM_THREADS];
-	sixel_display_ctx sixel_ctx[BUFFER_COUNT][NUM_THREADS];
+	trender_ctx_t ctx;
+	trender_ctx_init(&ctx, rows, cols);
 
-	int front[NUM_THREADS];
-	int back[NUM_THREADS];
-	for (int i = 0;i < NUM_THREADS;i++) {
-		front[i] = 0;
-		back[i] = 0;
-	}
-
-	if (NUM_THREADS == 1) {
-		render_ctx[0][0] = create_rendering_ctx(cols, rows, 0, rows);
-		init_sixel_display_ctx(&sixel_ctx[0][0], cols, rows);
-		init_sixel_indexed_bitmap(&sixel_ctx[0][0].bitmap, cols, rows);
-		init_sixel_palette_rgbuniform(&sixel_ctx[0][0].bitmap.palette, 5);
-	}
-	else {
-		for (int b = 0;b < BUFFER_COUNT;b++) {
-			for (int i = 1; i < NUM_THREADS; i++) {
-				int starty, endy;
-				starty = (rows * (i - 1)) / (NUM_THREADS - 1);
-				endy = (rows * ((i - 1) + 1)) / (NUM_THREADS - 1);
-				starty -= starty % 6;
-				endy -= endy % 6;
-				int rows_per_thread = endy - starty;
-				render_ctx[b][i - 1] = create_rendering_ctx(cols, rows, starty, endy);
-				init_sixel_display_ctx(&sixel_ctx[b][i - 1], cols, rows_per_thread);
-				init_sixel_indexed_bitmap(&sixel_ctx[b][i - 1].bitmap, cols, rows_per_thread);
-				init_sixel_palette_rgbuniform(&sixel_ctx[b][i - 1].bitmap.palette, 5);
-			}
-		}
-	}
-
-	omp_lock_t buffer_locks[BUFFER_COUNT][NUM_THREADS];
-	for (int b = 0;b < BUFFER_COUNT;b++) {
-		for (int i = 0; i < NUM_THREADS - 1; i++) {
-			omp_init_lock(&buffer_locks[b][i]);
-		}
-	}
-
-	monotonic_timer_t timer, timer_whole;
+	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
 
 	double total_processing_time = 0.0;
-	double total_display_time = 0.0;
-
 	double processing_time = 0.0;
-	double display_time = 0.0;
-
 	double previous_end_time = timer_elapsed_ms(&timer_whole);
 	double frame_time = 0.0;
 	double total_frame_time = 0.0;
@@ -245,18 +185,11 @@ int main() {
 		int thread_id = omp_get_thread_num();
 		int num_frames = 500;
 		int num_frame_counter = num_frames;
-		if (thread_id >= 1) {
-			render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[thread_id - 1]][thread_id - 1]);
-			convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx[back[thread_id - 1]][thread_id - 1], render_ctx[back[thread_id - 1]][thread_id - 1].output_buffer);
-			generate_sixel_display_data(&sixel_ctx[back[thread_id - 1]][thread_id - 1]);
-			int old_back = back[thread_id - 1];
-			back[thread_id - 1] = (old_back + 1) % BUFFER_COUNT;
-			set_lock_with_debug(&buffer_locks[back[thread_id - 1]][thread_id - 1], thread_id, back[thread_id - 1], thread_id - 1);
-		}
+		trender_generate_frame(&ctx, &mesh, model_view_projection, normal_matrix, model_view, thread_id, 0);
 #pragma omp barrier
 		if (NUM_THREADS >= 2 && thread_id == 0) {
 			for (int i = 0;i < NUM_THREADS - 1;i++) {
-				set_lock_with_debug(&buffer_locks[front[i]][i], thread_id, front[i], i);
+				set_lock_with_debug(&ctx.buffer_locks[ctx.front[i]][i], thread_id, ctx.front[i], i);
 			}
 		}
 #pragma omp barrier
@@ -308,81 +241,25 @@ int main() {
 					}
 				}
 			}
-			if (NUM_THREADS == 1) {
-				render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[0]][0]);
-			}
-			else if (thread_id >= 1) {
-				render_mesh(&mesh, model_view_projection, normal_matrix, model_view, &render_ctx[back[thread_id - 1]][thread_id - 1]);
-				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[thread_id - 1]][thread_id - 1], render_ctx[back[thread_id - 1]][thread_id - 1].output_buffer);
-				generate_sixel_display_data(&sixel_ctx[back[thread_id - 1]][thread_id - 1]);
-				int old_back = back[thread_id - 1];
-				back[thread_id - 1] = (old_back + 1) % BUFFER_COUNT;
-				set_lock_with_debug(&buffer_locks[back[thread_id - 1]][thread_id - 1], thread_id, back[thread_id - 1], thread_id - 1);
-				unset_lock_with_debug(&buffer_locks[old_back][thread_id - 1], thread_id, old_back, thread_id - 1);
-			}
-			if (NUM_THREADS == 1) {
-				convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(&sixel_ctx[back[0]][0], render_ctx[back[0]][0].output_buffer);
-				generate_sixel_display_data(&sixel_ctx[back[0]][0]);
-			}
+			trender_generate_frame(&ctx, &mesh, model_view_projection, normal_matrix, model_view, thread_id, 1);
 			if (thread_id == 0) {
-				display_time = 0.0;
-				if (NUM_THREADS == 1) {
-					timer_start(&timer);
-					tio_write(&tio_ctx, sixel_ctx[front[0]][0].data, sixel_ctx[front[0]][0].data_size);
-					display_time += timer_elapsed_ms(&timer);
-				}
-				if (NUM_THREADS == 2) {
-					timer_start(&timer);
-					tio_write(&tio_ctx, sixel_ctx[front[0]][0].data, sixel_ctx[front[0]][0].data_size);
-					display_time += timer_elapsed_ms(&timer);
-					int old_front = front[0];
-					front[0] = (old_front + 1) % BUFFER_COUNT;
-					set_lock_with_debug(&buffer_locks[front[0]][0], thread_id, front[0], 0);
-					unset_lock_with_debug(&buffer_locks[old_front][0], thread_id, old_front, 0);
-				}
-				else if (NUM_THREADS >= 3) {
-					int footer_len = 2;
-					timer_start(&timer);
-					tio_write(&tio_ctx, sixel_ctx[front[0]][0].data, sixel_ctx[front[0]][0].data_size - footer_len);
-					display_time += timer_elapsed_ms(&timer);
-					int old_front = front[0];
-					front[0] = (old_front + 1) % BUFFER_COUNT;
-					set_lock_with_debug(&buffer_locks[front[0]][0], thread_id, front[0], 0);
-					unset_lock_with_debug(&buffer_locks[old_front][0], thread_id, old_front, 0);
-					for (int i = 1; i < NUM_THREADS - 2; i++) {
-						timer_start(&timer);
-						tio_write(&tio_ctx, sixel_ctx[front[i]][i].sixel_data, sixel_ctx[front[i]][i].sixel_data_size - footer_len);
-						display_time += timer_elapsed_ms(&timer);
-						old_front = front[i];
-						front[i] = (old_front + 1) % BUFFER_COUNT;
-						set_lock_with_debug(&buffer_locks[front[i]][i], thread_id, front[i], i);
-						unset_lock_with_debug(&buffer_locks[old_front][i], thread_id, old_front, i);
-					}
-					timer_start(&timer);
-					tio_write(&tio_ctx, sixel_ctx[front[NUM_THREADS - 2]][NUM_THREADS - 2].sixel_data, sixel_ctx[front[NUM_THREADS - 2]][NUM_THREADS - 2].sixel_data_size);
-					display_time += timer_elapsed_ms(&timer);
-					old_front = front[NUM_THREADS - 2];
-					front[NUM_THREADS - 2] = (old_front + 1) % BUFFER_COUNT;
-					set_lock_with_debug(&buffer_locks[front[NUM_THREADS - 2]][NUM_THREADS - 2], thread_id, front[NUM_THREADS - 2], NUM_THREADS - 2);
-					unset_lock_with_debug(&buffer_locks[old_front][NUM_THREADS - 2], thread_id, old_front, NUM_THREADS - 2);
-				}
-				total_display_time += display_time;
+				trender_display_frame(&ctx, &tio_ctx);
 
 				current_end_time = timer_elapsed_ms(&timer_whole);
 				frame_time = current_end_time - previous_end_time;
 				previous_end_time = current_end_time;
 				total_frame_time += frame_time;
 
-				processing_time = fmaxf(0.0f, frame_time - display_time);
+				processing_time = fmaxf(0.0f, frame_time - ctx.display_time);
 				total_processing_time += processing_time;
 
-				printf("\x1b[H");    // Move cursor to home
+				// printf("\x1b[H");    // Move cursor to home
 				printf("\r\n");
 				//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
 				printf("Screen size: %d rows, %d cols, %d pixels\r\n", rows, cols, rows * cols);
 				//printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
 				printf("Processing:    %0.2f\r\n", processing_time);
-				printf("Display:       %0.2f\r\n", display_time);
+				printf("Display:       %0.2f\r\n", ctx.display_time);
 				printf("Frame time:    %0.2f\r\n", frame_time);
 				fflush(stdout);
 			}
@@ -390,28 +267,28 @@ int main() {
 		if (thread_id == 0) {
 			atomic_store(&keep_running, 0);
 			if (NUM_THREADS == 2) {
-				unset_lock_with_debug(&buffer_locks[front[0]][0], 0, front[0], 0);
+				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[0]][0], 0, ctx.front[0], 0);
 			}
 			else if (NUM_THREADS >= 3) {
-				unset_lock_with_debug(&buffer_locks[front[0]][0], 0, front[0], 0);
+				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[0]][0], 0, ctx.front[0], 0);
 				for (int i = 1; i < NUM_THREADS - 2; i++) {
-					unset_lock_with_debug(&buffer_locks[front[i]][i], 0, front[i], i);
+					unset_lock_with_debug(&ctx.buffer_locks[ctx.front[i]][i], 0, ctx.front[i], i);
 				}
-				unset_lock_with_debug(&buffer_locks[front[NUM_THREADS - 2]][NUM_THREADS - 2], 0, front[NUM_THREADS - 2], NUM_THREADS - 2);
+				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[NUM_THREADS - 2]][NUM_THREADS - 2], 0, ctx.front[NUM_THREADS - 2], NUM_THREADS - 2);
 			}
 			printf("\r\n");
 			printf("Total times:\r\n");
 			printf("Processing:    %0.2f\r\n", total_processing_time);
-			printf("Display:       %0.2f\r\n", total_display_time);
+			printf("Display:       %0.2f\r\n", ctx.total_display_time);
 			printf("Frame time:    %0.2f\r\n", total_frame_time);
 			printf("Average times:\r\n");
 			printf("Processing:    %0.2f\r\n", total_processing_time / (float)num_frames);
-			printf("Display:       %0.2f\r\n", total_display_time / (float)num_frames);
+			printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)num_frames);
 			printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
 		}
-		
+
 		if (NUM_THREADS >= 2 && thread_id >= 1) {
-			unset_lock_with_debug(&buffer_locks[back[thread_id - 1]][thread_id - 1], thread_id, back[thread_id - 1], thread_id - 1);
+			unset_lock_with_debug(&ctx.buffer_locks[ctx.back[thread_id - 1]][thread_id - 1], thread_id, ctx.back[thread_id - 1], thread_id - 1);
 		}
 		printf("%d exited loop\r\n", thread_id);
 		fflush(stdout);
@@ -419,40 +296,7 @@ int main() {
 
 	printf("All threads joined\r\n");
 	double whole_time = timer_elapsed_ms(&timer_whole);
-
-	double total_clear_time = render_ctx[0][0].total_clear_time;
-	double total_rasterisation_time = render_ctx[0][0].total_rasterisation_time;
-	double total_texture_sampling_time = render_ctx[0][0].total_texture_sampling_time;
-	double total_generation_time = sixel_ctx[0][0].total_generation_time;
-	double total_conversion_time = sixel_ctx[0][0].total_conversion_time;
-	for (int b = 0;b < BUFFER_COUNT;b++) {
-		for (int i = 0; i < NUM_THREADS - 1; i++) {
-			if (b == 0 && i == 0)continue;
-			total_clear_time += render_ctx[b][i].total_clear_time;
-			total_rasterisation_time += render_ctx[b][i].total_rasterisation_time;
-			total_texture_sampling_time += render_ctx[b][i].total_texture_sampling_time;
-			total_generation_time += sixel_ctx[b][i].total_generation_time;
-			total_conversion_time += sixel_ctx[b][i].total_conversion_time;
-		}
-	}
-
-	double total_frame_gen_time =
-		total_clear_time +
-		total_rasterisation_time +
-		total_texture_sampling_time +
-		total_generation_time +
-		total_conversion_time;
-	double unaccounted_time = whole_time - total_frame_gen_time - total_display_time;
-
-	printf("total_clear_time:            %0.2f\r\n", total_clear_time);
-	printf("total_rasterisation_time:    %0.2f\r\n", total_rasterisation_time);
-	printf("total_texture_sampling_time: %0.2f\r\n", total_texture_sampling_time);
-	printf("total_conversion_time:       %0.2f\r\n", total_conversion_time);
-	printf("total_generation_time:       %0.2f\r\n", total_generation_time);
-	printf("total_frame_gen_time:        %0.2f\r\n", total_frame_gen_time);
-	printf("total_display_time:          %0.2f\r\n", total_display_time);
-	printf("Total time for %d frames:    %0.2f ms\r\n", 500, whole_time);
-	printf("unaccounted_time:            %0.2f\r\n", unaccounted_time);
+	trender_print_stats(&ctx, whole_time);
 
 	fflush(stdout);
 	//tinyobj_attrib_free(&(mesh.attrib));

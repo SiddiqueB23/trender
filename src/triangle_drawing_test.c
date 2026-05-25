@@ -471,10 +471,12 @@ int main() {
 	//float v2_x = (float)cols - 10.0f;
 	//float v2_y = (float)rows - 10.0f;
 	float v0_x = -16.881523, v0_y = -64.941948, v1_x = 320.140137, v1_y = -64.941948, v2_x = 320.140137, v2_y = 255.625458;
+	sixel_indexed_bitmap bitmap;
+	init_sixel_indexed_bitmap(&bitmap, cols, rows);
+	init_sixel_palette_rgbuniform(&bitmap.palette, 5);
 	sixel_display_ctx sixel_ctx;
 	init_sixel_display_ctx(&sixel_ctx, cols, rows);
-	init_sixel_indexed_bitmap(&sixel_ctx.bitmap, cols, rows);
-	init_sixel_palette_rgbuniform(&sixel_ctx.bitmap.palette, 5);
+	sixel_ctx.bitmap = &bitmap;
 
 	monotonic_timer_t timer, timer_whole;
 	timer_start(&timer_whole);
@@ -537,8 +539,8 @@ int main() {
 		}
 
 		timer_start(&timer);
-		if (draw_mode == 1)convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, fb);
-		if (draw_mode == 2 || draw_mode == 4)convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, alpha, beta);
+		if (draw_mode == 1)convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_ctx.bitmap, fb);
+		if (draw_mode == 2 || draw_mode == 4)convert_alpha_beta_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_ctx.bitmap, alpha, beta);
 		conversion_time = timer_elapsed_ms(&timer);
 		total_conversion_time += conversion_time;
 

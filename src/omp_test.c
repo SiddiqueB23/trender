@@ -54,10 +54,12 @@ int main() {
 	rows = 540;
 	framebuffer_4i8 fb = create_framebuffer_4i8(cols, rows);
 
+	sixel_indexed_bitmap bitmap;
+	init_sixel_indexed_bitmap(&bitmap, cols, rows);
+	init_sixel_palette_rgbuniform(&bitmap.palette, 5);
 	sixel_display_ctx sixel_ctx;
 	init_sixel_display_ctx(&sixel_ctx, cols, rows);
-	init_sixel_indexed_bitmap(&sixel_ctx.bitmap, cols, rows);
-	init_sixel_palette_rgbuniform(&sixel_ctx.bitmap.palette, 5);
+	sixel_ctx.bitmap = &bitmap;
 
 	monotonic_timer_t timer, timer_whole;
 	timer_start(&timer_whole);
@@ -106,7 +108,7 @@ int main() {
 				total_draw_time += draw_time;
 
 				timer_start(&timer);
-				convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(&sixel_ctx.bitmap, fb);
+				convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(sixel_ctx.bitmap, fb);
 				conversion_time = timer_elapsed_ms(&timer);
 				total_conversion_time += conversion_time;
 

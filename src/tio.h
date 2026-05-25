@@ -7,7 +7,7 @@
 #define TIO_WINDOWS_IMPLEMENTATION 0
 #endif
 
-#if defined(__linux__) || defined(__linux) || defined(__gnu_linux__)
+#if defined(__linux__) || defined(__linux) || defined(__gnu_linux__) || defined(__unix__) || (defined(__APPLE__) || defined(__MACH__))
 #define TIO_LINUX_IMPLEMENTATION 1  
 #else
 #define TIO_LINUX_IMPLEMENTATION 0
