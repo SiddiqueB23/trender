@@ -1,6 +1,6 @@
 #pragma once
 
-#define NUM_THREADS 1
+#define NUM_THREADS 2
 #define BUFFER_COUNT 3
 
 #include "rendering_avx2_u16_mt.h"

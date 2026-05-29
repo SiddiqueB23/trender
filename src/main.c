@@ -244,7 +244,11 @@ int main() {
 					int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
 					event_bytes_processed += bytes_processed;
 					if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-						if (event.code == 'Q' || event.code == CTRL_Q) {
+						if (event.code == UPPERCASE_Q || event.code == CTRL_Q) {
+#pragma omp critical
+							{
+								keep_running = 0;
+							}
 							break;
 						}
 						switch (event.code) {

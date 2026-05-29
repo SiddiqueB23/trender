@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>
+#include "utils.h"
 
 typedef struct {
     void* data;
