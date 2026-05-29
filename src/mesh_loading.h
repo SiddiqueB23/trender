@@ -22,21 +22,9 @@
 #include "textures.h"
 
 typedef struct {
-	float diffuse[3];
-	//float ambient[3];
-	//float specular[3];
-	//float transmittance[3];
-	//float emission[3];
-	//float shininess;
-	//float ior;      /* index of refraction */
-	//float dissolve; /* 1 == opaque; 0 == fully transparent */
-	texture_t diffuse_texture;            /* map_Kd */
-	//char* ambient_texname;            /* map_Ka */
-	//char* specular_texname;           /* map_Ks */
-	//char* specular_highlight_texname; /* map_Ns */
-	//char* bump_texname;               /* map_bump, bump */
-	//char* displacement_texname;       /* disp */
-	//char* alpha_texname;              /* map_d */
+	int32_t diffuse_atlas_offset;
+	int texture_width;
+	int texture_height;
 }material_t;
 
 typedef struct {
@@ -47,6 +35,7 @@ typedef struct {
 	size_t num_materials;
 	size_t start_triangle_index;
 	size_t end_triangle_index;
+	texture_atlas_t diffuse_atlas;
 }mesh_t;
 
 static char* mmap_file(size_t* len, const char* filename) {
@@ -163,59 +152,88 @@ static char* get_dirname(char* path, char* dir_path) {
 void print_material_info(material_t* materials, size_t num_materials) {
 	for (size_t i = 0; i < num_materials; i++) {
 		printf("Material %zu:\n", i);
-		printf("  Diffuse: [%f, %f, %f]\n", materials[i].diffuse[0], materials[i].diffuse[1], materials[i].diffuse[2]);
-		//printf("  Ambient: [%f, %f, %f]\n", materials[i].ambient[0], materials[i].ambient[1], materials[i].ambient[2]);
-		//printf("  Specular: [%f, %f, %f]\n", materials[i].specular[0], materials[i].specular[1], materials[i].specular[2]);
-		//printf("  Transmittance: [%f, %f, %f]\n", materials[i].transmittance[0], materials[i].transmittance[1], materials[i].transmittance[2]);
-		//printf("  Emission: [%f, %f, %f]\n", materials[i].emission[0], materials[i].emission[1], materials[i].emission[2]);
-		//printf("  Shininess: %f\n", materials[i].shininess);
-		//printf("  IOR (Index of Refraction): %f\n", materials[i].ior);
-		//printf("  Dissolve (Opacity): %f\n", materials[i].dissolve);
-
-		if (materials[i].diffuse_texture.data) {
-			printf("  Diffuse Texture: Width: %d, Height:%d\n", materials[i].diffuse_texture.width, materials[i].diffuse_texture.height);
-		}
-		else {
-			printf("  Diffuse Texture: NULL\n");
-		}
+		printf("  Diffuse Atlas Offset: %d\n", materials[i].diffuse_atlas_offset);
+		printf("  Texture Width: %d\n", materials[i].texture_width);
+		printf("  Texture Height: %d\n", materials[i].texture_height);
 		//printf("\n");
 	}
 }
 
-int load_materials(tinyobj_material_t* materials, size_t num_materials, material_t* loaded_materials, char* texture_dir_path) {
+int load_materials(tinyobj_material_t* materials, size_t num_materials, material_t* loaded_materials, char* texture_dir_path, texture_atlas_t* atlas) {
+	int atlas_length = 1 + (int)num_materials;
 	for (int i = 0;i < (int)num_materials;i++) {
-		loaded_materials[i].diffuse[0] = materials[i].diffuse[0];
-		loaded_materials[i].diffuse[1] = materials[i].diffuse[1];
-		loaded_materials[i].diffuse[2] = materials[i].diffuse[2];
-		//loaded_materials[i].ambient[0] = materials[i].ambient[0];
-		//loaded_materials[i].ambient[1] = materials[i].ambient[1];
-		//loaded_materials[i].ambient[2] = materials[i].ambient[2];
-		//loaded_materials[i].specular[0] = materials[i].specular[0];
-		//loaded_materials[i].specular[1] = materials[i].specular[1];
-		//loaded_materials[i].specular[2] = materials[i].specular[2];
-		//loaded_materials[i].transmittance[0] = materials[i].transmittance[0];
-		//loaded_materials[i].transmittance[1] = materials[i].transmittance[1];
-		//loaded_materials[i].transmittance[2] = materials[i].transmittance[2];
-
-		loaded_materials[i].diffuse_texture.data = NULL;
 		if (materials[i].diffuse_texname != NULL) {
+			int already_loaded_idx = -1;
+			for (int j = 0;j < i;j++) {
+				if (materials[j].diffuse_texname == NULL)continue;
+				if (strcmp(materials[i].diffuse_texname, materials[j].diffuse_texname) == 0) {
+					already_loaded_idx = j;
+					break;
+				}
+			}
+			if (already_loaded_idx != -1) continue;
+			int texture_width, texture_height, texture_color_size;
 			char texture_path[128];
 			strcpy(texture_path, texture_dir_path);
 			strcat(texture_path, materials[i].diffuse_texname);
-			loaded_materials[i].diffuse_texture.data = stbi_load(texture_path, 
-				&(loaded_materials[i].diffuse_texture.width), 
-				&(loaded_materials[i].diffuse_texture.height), 
-				&(loaded_materials[i].diffuse_texture.color_size), 4);
-			if (loaded_materials[i].diffuse_texture.data == NULL) {
+			stbi_info(texture_path, &texture_width, &texture_height, &texture_color_size);
+			if (texture_width <= 0 || texture_height <= 0) {
+				fprintf(stderr, "Failed to get texture image info\nFilepath: %s\r\n", texture_path);
+				return -1;
+			}
+			atlas_length += texture_width * texture_height;
+			printf("Texture image info: %s, Material ID: %d, Width: %d, Height: %d, Color Size: %d\r\n", texture_path, i, texture_width, texture_height, texture_color_size);
+			printf("Calculated atlas length so far: %d\r\n", atlas_length);
+		}
+	}
+	atlas->color_size = 2;
+	atlas->length = 0;
+	atlas->data = NULL;
+	atlas->data = malloc(atlas_length * sizeof(uint16_t));
+	if (atlas->data == NULL) {
+		fprintf(stderr, "Failed to allocate memory for texture atlas\n");
+		return -1;
+	}
+	
+	append_3f32rgb_to_5r6g5b_texture_atlas((float[]) { 1.0f, 0.0f, 1.0f }, atlas); // Reserve the first entry for default color
+	for (int i = 0;i < (int)num_materials;i++) {
+		loaded_materials[i].diffuse_atlas_offset = atlas->length;
+		append_3f32rgb_to_5r6g5b_texture_atlas(materials[i].diffuse, atlas);
+		loaded_materials[i].texture_height = 0;
+		loaded_materials[i].texture_width =  0;
+	}
+	for (int i = 0;i < (int)num_materials;i++) {
+		if (materials[i].diffuse_texname != NULL) {
+			int already_loaded_idx = -1;
+			for (int j = 0;j < i;j++) {
+				if (materials[j].diffuse_texname == NULL)continue;
+				if (strcmp(materials[i].diffuse_texname, materials[j].diffuse_texname) == 0) {
+					already_loaded_idx = j;
+					break;
+				}
+			}
+			if (already_loaded_idx != -1) {
+				loaded_materials[i].diffuse_atlas_offset = loaded_materials[already_loaded_idx].diffuse_atlas_offset;
+				loaded_materials[i].texture_width = loaded_materials[already_loaded_idx].texture_width;
+				loaded_materials[i].texture_height = loaded_materials[already_loaded_idx].texture_height;
+				continue;
+			}
+			texture_t temp_texture;
+			char texture_path[128];
+			strcpy(texture_path, texture_dir_path);
+			strcat(texture_path, materials[i].diffuse_texname);
+			temp_texture.data = (unsigned char*)stbi_load(texture_path, &temp_texture.width, &temp_texture.height, &temp_texture.color_size, 4);
+			if (temp_texture.data == NULL) {
 				fprintf(stderr, "Failed to load texture image\nFilepath: %s\r\n", texture_path);
 				return -1;
 			}
-			//printf("Loaded texture image: %s, Material ID: %d\n", texture_path, i);
-		}
-		else {
-			loaded_materials[i].diffuse_texture.width = 0;
-			loaded_materials[i].diffuse_texture.height = 0;
-			loaded_materials[i].diffuse_texture.color_size = 0;
+			loaded_materials[i].diffuse_atlas_offset = atlas->length;
+			loaded_materials[i].texture_width = temp_texture.width;
+			loaded_materials[i].texture_height = temp_texture.height;
+			printf("Loaded texture image: %s, Material ID: %d\r\n", texture_path, i);
+			append_8r8g8b8a_texture_to_5r6g5b_texture_atlas(&temp_texture, atlas);
+			printf("Converted texture to 5r6g5b format and appended to atlas: %s, Material ID: %d\r\n", texture_path, i);
+			stbi_image_free(temp_texture.data);
 		}
 	}
 	return 0;
@@ -233,7 +251,7 @@ int load_obj(char* obj_path, mesh_t* mesh) {
 	mesh->materials = (material_t*)calloc(mesh->num_materials, sizeof(material_t));
 	char texture_dir_path[128];
 	get_dirname(obj_path, texture_dir_path);
-	ret = load_materials(materials, mesh->num_materials, mesh->materials, texture_dir_path);
+	ret = load_materials(materials, mesh->num_materials, mesh->materials, texture_dir_path, &mesh->diffuse_atlas);
 	if (ret != 0) {
 		fprintf(stderr, "Failed to load materials: %d\nFilepath: %s\r\n", ret, obj_path);
 		return 1;

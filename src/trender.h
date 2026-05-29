@@ -1,6 +1,6 @@
 #pragma once
 
-#define NUM_THREADS 4
+#define NUM_THREADS 1
 #define BUFFER_COUNT 3
 
 #include "rendering_avx2_u16_mt.h"
@@ -79,12 +79,17 @@ static inline void trender_ctx_init(trender_ctx_t* ctx, int rows, int cols) {
 
 // release_old_lock=0 for the warmup frame (no previous lock held), 1 for all in-loop frames.
 static inline void trender_generate_frame(trender_ctx_t* ctx, mesh_t* mesh,
-	mat4 mvp, mat3 normal, mat4 mv, int thread_id, int release_old_lock) {
+	render_params_t new_params, int thread_id, int release_old_lock) {
 	if (NUM_THREADS == 1) {
-		render_mesh(mesh, mvp, normal, mv, &ctx->render_ctx[0]);
+		render_params_copy(&ctx->render_ctx[0].params, &new_params);
+		render_mesh(mesh, &ctx->render_ctx[0]);
 	} else if (thread_id >= 1) {
-		render_mesh(mesh, mvp, normal, mv, &ctx->render_ctx[thread_id - 1]);
-		convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(
+#pragma omp critical
+		{
+			render_params_copy(&ctx->render_ctx[thread_id - 1].params, &new_params);
+		}
+		render_mesh(mesh, &ctx->render_ctx[thread_id - 1]);
+		convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2(
 			&ctx->sixel_ctx[ctx->back[thread_id - 1]][thread_id - 1],
 			ctx->render_ctx[thread_id - 1].output_buffer);
 		generate_sixel_display_data(&ctx->sixel_ctx[ctx->back[thread_id - 1]][thread_id - 1]);
@@ -104,7 +109,7 @@ static inline void trender_generate_frame(trender_ctx_t* ctx, mesh_t* mesh,
 static inline void trender_display_frame(trender_ctx_t* ctx, tio_ctx_t* tio) {
 	ctx->display_time = 0.0;
 	if (NUM_THREADS == 1) {
-		convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors(
+		convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2(
 			&ctx->sixel_ctx[ctx->back[0]][0], ctx->render_ctx[0].output_buffer);
 		generate_sixel_display_data(&ctx->sixel_ctx[ctx->back[0]][0]);
 		timer_start(&ctx->timer);

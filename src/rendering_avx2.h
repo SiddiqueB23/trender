@@ -135,6 +135,7 @@ processed_vertex_t lerp_processed_vertex_pair(processed_vertex_t v0, processed_v
 	return out;
 }
 
+DECLSPEC_NOINLINE
 void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processed_triangle_t* out2, int* num_out) {
 	*out1 = in;
 	*num_out = 1;
@@ -232,7 +233,14 @@ void viewport_transform(processed_vertex_t* v, int width, int height, float* x, 
 
 static inline __m256i modulo_int_avx2(__m256i x, int modulus) {
 	__m256i mod = _mm256_set1_epi32(modulus);
-	__m256i result = _mm256_rem_epi32(x, mod);
+	__m256 fa = _mm256_cvtepi32_ps(x);
+	__m256 fb = _mm256_cvtepi32_ps(mod);
+	__m256 quotient = _mm256_div_ps(fa, fb);
+	__m256 truncated = _mm256_round_ps(quotient, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+	__m256 prod = _mm256_mul_ps(truncated, fb);
+	__m256 rem_f = _mm256_sub_ps(fa, prod);
+	__m256i result = _mm256_cvttps_epi32(rem_f);
+
 	__m256i mask = _mm256_cmpgt_epi32(_mm256_setzero_si256(), result);
 	result = _mm256_add_epi32(result, _mm256_and_si256(mask, mod));
 	return result;
