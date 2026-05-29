@@ -41,6 +41,7 @@ void update_view_matrix(mat4 view_matrix) {
 void first_person_camera(int event_code,
 	mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix,
 	render_params_t* render_params) {
+	(void)model_matrix; (void)projection_matrix; (void)render_params;
 	float camera_facing_x = sinf(glm_rad(camera_yaw));
 	float camera_facing_y = sinf(glm_rad(camera_pitch));
 	float camera_facing_z = cosf(glm_rad(camera_yaw));
@@ -124,7 +125,7 @@ void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float
 	*maxy = FLT_MIN;
 	*maxz = FLT_MIN;
 
-	for (int i = 0; i < mesh->attrib.num_vertices; i++) {
+	for (int i = 0; i < (int)mesh->attrib.num_vertices; i++) {
 		float x = mesh->attrib.vertices[3 * i + 0];
 		float y = mesh->attrib.vertices[3 * i + 1];
 		float z = mesh->attrib.vertices[3 * i + 2];
@@ -139,7 +140,7 @@ void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float
 
 int keep_running = 1;
 
-int main() {
+int main(void) {
 
 	tio_init(&tio_ctx);
 	atexit(cleanup);
@@ -155,7 +156,7 @@ int main() {
 	mesh_t mesh;
 	int ret = load_obj(obj_path, &mesh);
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s\r\n", ret, obj_path);
+		fprintf(stderr, "Failed to load mesh: %d\r\nFilepath: %s\r\n", ret, obj_path);
 		return 1;
 	}
 
@@ -163,9 +164,9 @@ int main() {
 
 	float minx, miny, minz, maxx, maxy, maxz;
 	get_bounding_box(&mesh, &minx, &miny, &minz, &maxx, &maxy, &maxz);
-	printf("Mesh bounding box:\n");
-	printf("  Min: (%.2f, %.2f, %.2f)\n", minx, miny, minz);
-	printf("  Max: (%.2f, %.2f, %.2f)\n", maxx, maxy, maxz);
+	printf("Mesh bounding box:\r\n");
+	printf("  Min: (%.2f, %.2f, %.2f)\r\n", minx, miny, minz);
+	printf("  Max: (%.2f, %.2f, %.2f)\r\n", maxx, maxy, maxz);
 	translate_x = -(minx + maxx) / 2.0f;
 	translate_y = -(miny + maxy) / 2.0f;
 	translate_z = -(minz + maxz) / 2.0f;
@@ -176,10 +177,10 @@ int main() {
 
 	int rows = 0, cols = 0;
 	if (tio_get_window_size(&tio_ctx, &rows, &cols) == -1) {
-		fprintf(stderr, "Unable to get window size\n");
+		fprintf(stderr, "Unable to get window size\r\n");
 		return 1;
 	}
-	printf("Window size: %d rows, %d cols\n", rows, cols);
+	printf("Window size: %d rows, %d cols\r\n", rows, cols);
 	rows *= 2;
 	rows *= 5;
 	cols *= 5;
@@ -226,7 +227,7 @@ int main() {
 			}
 		}
 #pragma omp barrier
-		while (num_frames--) {
+		while (num_frame_counter--) {
 			int thread_keeps_running = 0;
 #pragma omp critical
 			{

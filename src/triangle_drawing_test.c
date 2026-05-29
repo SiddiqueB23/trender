@@ -445,7 +445,7 @@ void draw_triangle4(framebuffer_f* alpha, framebuffer_f* beta, float v0_x, float
 	}
 }
 
-int main() {
+int main(void) {
 
 	tio_init(&ctx);
 	atexit(cleanup);

@@ -197,24 +197,20 @@ void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processe
 	}
 	if (vertex_count == 1) {
 		processed_vertex_t inside_vertex, outside_vertex1, outside_vertex2;
-		int inside_index;
 		if (is_inside_near_plane(in.v0)) {
 			inside_vertex = in.v0;
 			outside_vertex1 = in.v1;
 			outside_vertex2 = in.v2;
-			inside_index = 0;
 		}
 		else if (is_inside_near_plane(in.v1)) {
 			inside_vertex = in.v1;
 			outside_vertex1 = in.v2;
 			outside_vertex2 = in.v0;
-			inside_index = 1;
 		}
 		else {
 			inside_vertex = in.v2;
 			outside_vertex1 = in.v0;
 			outside_vertex2 = in.v1;
-			inside_index = 2;
 		}
 		float t1 = get_lerp_parameter(inside_vertex, outside_vertex1);
 		float t2 = get_lerp_parameter(inside_vertex, outside_vertex2);
@@ -228,24 +224,20 @@ void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processe
 	}
 	if (vertex_count == 2) {
 		processed_vertex_t inside_vertex1, inside_vertex2, outside_vertex;
-		int outside_index;
 		if (!is_inside_near_plane(in.v0)) {
 			outside_vertex = in.v0;
 			inside_vertex1 = in.v1;
 			inside_vertex2 = in.v2;
-			outside_index = 0;
 		}
 		else if (!is_inside_near_plane(in.v1)) {
 			outside_vertex = in.v1;
 			inside_vertex1 = in.v2;
 			inside_vertex2 = in.v0;
-			outside_index = 1;
 		}
 		else {
 			outside_vertex = in.v2;
 			inside_vertex1 = in.v0;
 			inside_vertex2 = in.v1;
-			outside_index = 2;
 		}
 		float t1 = get_lerp_parameter(inside_vertex1, outside_vertex);
 		float t2 = get_lerp_parameter(inside_vertex2, outside_vertex);
@@ -495,8 +487,6 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t triangle, r
 void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, texture_atlas_t* atlas) {
 	framebuffer_i32* index_buffer = &ctx->index_buffer;
 	framebuffer_u16* output_buffer = &ctx->output_buffer;
-	int starty = ctx->starty, endy = ctx->endy;
-
 	int width = index_buffer->width, height = index_buffer->height;
 	int length = width * height;
 	int32_t* ib_data = index_buffer->data;
@@ -539,7 +529,7 @@ void render_mesh(mesh_t* mesh, rendering_ctx_t* ctx) {
 		processed_vertex_t vert1 = process_vertex(vert_input1, ctx->params.model_view_projection);
 		processed_vertex_t vert2 = process_vertex(vert_input2, ctx->params.model_view_projection);
 
-		processed_triangle_t triangle = { vert0, vert1, vert2 };
+		processed_triangle_t triangle = { vert0, vert1, vert2, 0, 0, 0 };
 		processed_triangle_t clipped_triangle0, clipped_triangle1;
 		int num_clipped_triangles = 0;
 		clip_triangle(triangle, &clipped_triangle0, &clipped_triangle1, &num_clipped_triangles);

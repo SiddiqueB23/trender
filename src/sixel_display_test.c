@@ -40,7 +40,7 @@ void random_squares_bitmap(sixel_indexed_bitmap* bitmap, int size) {
 	}
 }
 
-int main() {
+int main(void) {
 
 	tio_init(&ctx);
 	atexit(cleanup);

@@ -36,7 +36,7 @@ void rainbow_gradient(framebuffer_4i8* fb, int time, int thread_id) {
 	}
 }
 
-int main() {
+int main(void) {
 
 	tio_init(&ctx);
 	atexit(cleanup);

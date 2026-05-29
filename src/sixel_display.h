@@ -400,7 +400,7 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
 	sixel_indexed_bitmap* bitmap = ctx->bitmap;
 	timer_start(&ctx->timer);
-	int img_x = fb.width, img_y = fb.height, img_n = 1;
+	int img_x = fb.width, img_y = fb.height;
 	uint16_t* image_data_ptr = fb.data;
 	unsigned char* index_data_ptr = bitmap->index_data;
 
@@ -476,7 +476,7 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2_v2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
 	sixel_indexed_bitmap* bitmap = ctx->bitmap;
 	timer_start(&ctx->timer);
-	int img_x = fb.width, img_y = fb.height, img_n = 1;
+	int img_x = fb.width, img_y = fb.height;
 	uint16_t* image_data_ptr = fb.data;
 	unsigned char* index_data_ptr = bitmap->index_data;
 
@@ -622,23 +622,30 @@ char* fast_itoa_less_than_10000(char* buffer, int num) {
 }
 
 static inline char* encode_sixel_data_header(char* buffer) {
-	return buffer + sprintf(buffer, "\x1bP9;1;;q");
+	memcpy(buffer, "\x1bP9;1;;q", 8);
+	return buffer + 8;
 }
 
 static inline char* encode_sixel_data_terminator(char* buffer) {
-	return buffer + sprintf(buffer, "\x1b\\");
+	buffer[0] = '\x1b';
+	buffer[1] = '\\';
+	return buffer + 2;
 }
 
 static inline char* encode_sixel_data_modify_color(char* buffer,
 	int color_number,
 	enum sixel_palette_color_type color_type,
 	sixel_palette_color color) {
-	buffer += sprintf(buffer, "#%d;%d;%d;%d;%d",
-		color_number,
-		color_type,
-		color[0],
-		color[1],
-		color[2]);
+	*buffer++ = '#';
+	buffer = fast_itoa(buffer, color_number);
+	*buffer++ = ';';
+	buffer = fast_itoa(buffer, (int)color_type);
+	*buffer++ = ';';
+	buffer = fast_itoa(buffer, color[0]);
+	*buffer++ = ';';
+	buffer = fast_itoa(buffer, color[1]);
+	*buffer++ = ';';
+	buffer = fast_itoa(buffer, color[2]);
 	return buffer;
 }
 
@@ -819,6 +826,7 @@ static inline void transpose_bitmap_to_columns(sixel_display_ctx* ctx, int y_sta
 }
 
 static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffer, int y_start, int width, int height) {
+	(void)y_start;
 	int* painted = ctx->painted;
 	for (int i = 0; i < 2048 && i < width; i++)
 		painted[i] = 0;
@@ -835,7 +843,6 @@ static inline char* encode_sixel_row_alt_opt(sixel_display_ctx* ctx, char* buffe
 	int startx = x;
 	int endx = x;
 	int scale_x = ctx->scale_x;
-	int scale_y = ctx->scale_y;
 	while (1) {
 		int current_mask = 0;
 		int painted_mask = 0;
@@ -909,7 +916,8 @@ void generate_sixel_display_data(sixel_display_ctx* ctx) {
 
 	if (!ctx->header_valid) {
 		char* palette_ptr = ctx->header_data; // Reset pointer to the start
-		palette_ptr += sprintf(palette_ptr, "\x1b[H");
+		memcpy(palette_ptr, "\x1b[H", 3);
+		palette_ptr += 3;
 		palette_ptr = encode_sixel_data_header(palette_ptr);
 
 		for (int i = 0; i < ctx->bitmap->palette.size; i++) {

@@ -77,7 +77,7 @@ static char* mmap_file(size_t* len, const char* filename) {
 	}
 
 	if (!S_ISREG(sb.st_mode)) {
-		fprintf(stderr, "%s is not a file\n", filename);
+		fprintf(stderr, "%s is not a file\r\n", filename);
 		return NULL;
 	}
 
@@ -108,9 +108,10 @@ static void get_file_data(void* ctx, const char* filename, const int is_mtl,
 	// app)
 	// This example uses mmap(), so no free() required.
 	(void)ctx;
+	(void)is_mtl; (void)obj_filename;
 
 	if (!filename) {
-		fprintf(stderr, "null filename\n");
+		fprintf(stderr, "null filename\r\n");
 		(*data) = NULL;
 		(*len) = 0;
 		return;
@@ -151,10 +152,10 @@ static char* get_dirname(char* path, char* dir_path) {
 
 void print_material_info(material_t* materials, size_t num_materials) {
 	for (size_t i = 0; i < num_materials; i++) {
-		printf("Material %zu:\n", i);
-		printf("  Diffuse Atlas Offset: %d\n", materials[i].diffuse_atlas_offset);
-		printf("  Texture Width: %d\n", materials[i].texture_width);
-		printf("  Texture Height: %d\n", materials[i].texture_height);
+		printf("Material %zu:\r\n", i);
+		printf("  Diffuse Atlas Offset: %d\r\n", materials[i].diffuse_atlas_offset);
+		printf("  Texture Width: %d\r\n", materials[i].texture_width);
+		printf("  Texture Height: %d\r\n", materials[i].texture_height);
 		//printf("\n");
 	}
 }
@@ -178,7 +179,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 			strcat(texture_path, materials[i].diffuse_texname);
 			stbi_info(texture_path, &texture_width, &texture_height, &texture_color_size);
 			if (texture_width <= 0 || texture_height <= 0) {
-				fprintf(stderr, "Failed to get texture image info\nFilepath: %s\r\n", texture_path);
+				fprintf(stderr, "Failed to get texture image info\r\nFilepath: %s\r\n", texture_path);
 				return -1;
 			}
 			atlas_length += texture_width * texture_height;
@@ -191,7 +192,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 	atlas->data = NULL;
 	atlas->data = malloc(atlas_length * sizeof(uint16_t));
 	if (atlas->data == NULL) {
-		fprintf(stderr, "Failed to allocate memory for texture atlas\n");
+		fprintf(stderr, "Failed to allocate memory for texture atlas\r\n");
 		return -1;
 	}
 	
@@ -224,7 +225,7 @@ int load_materials(tinyobj_material_t* materials, size_t num_materials, material
 			strcat(texture_path, materials[i].diffuse_texname);
 			temp_texture.data = (unsigned char*)stbi_load(texture_path, &temp_texture.width, &temp_texture.height, &temp_texture.color_size, 4);
 			if (temp_texture.data == NULL) {
-				fprintf(stderr, "Failed to load texture image\nFilepath: %s\r\n", texture_path);
+				fprintf(stderr, "Failed to load texture image\r\nFilepath: %s\r\n", texture_path);
 				return -1;
 			}
 			loaded_materials[i].diffuse_atlas_offset = atlas->length;
@@ -243,7 +244,7 @@ int load_obj(char* obj_path, mesh_t* mesh) {
 	tinyobj_material_t* materials = NULL;
 	int ret = load_mesh(obj_path, &(mesh->attrib), &(mesh->shapes), &(mesh->num_shapes), &materials, &(mesh->num_materials));
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load mesh: %d\nFilepath: %s\r\n", ret, obj_path);
+		fprintf(stderr, "Failed to load mesh: %d\r\nFilepath: %s\r\n", ret, obj_path);
 		return 1;
 	}
 	mesh->start_triangle_index = 0;
@@ -253,7 +254,7 @@ int load_obj(char* obj_path, mesh_t* mesh) {
 	get_dirname(obj_path, texture_dir_path);
 	ret = load_materials(materials, mesh->num_materials, mesh->materials, texture_dir_path, &mesh->diffuse_atlas);
 	if (ret != 0) {
-		fprintf(stderr, "Failed to load materials: %d\nFilepath: %s\r\n", ret, obj_path);
+		fprintf(stderr, "Failed to load materials: %d\r\nFilepath: %s\r\n", ret, obj_path);
 		return 1;
 	}
 	tinyobj_materials_free(materials, mesh->num_materials);

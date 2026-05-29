@@ -25,12 +25,14 @@ typedef struct {
 } trender_ctx_t;
 
 static inline void set_lock_with_debug(omp_lock_t* lock, int thread_id, int buffer_id1, int buffer_id2) {
+	(void)thread_id; (void)buffer_id1; (void)buffer_id2;
 	// printf("\x1b[33mThread %d waiting for lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
 	omp_set_lock(lock);
 	// printf("\x1b[32mThread %d acquired lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
 }
 
 static inline void unset_lock_with_debug(omp_lock_t* lock, int thread_id, int buffer_id1, int buffer_id2) {
+	(void)thread_id; (void)buffer_id1; (void)buffer_id2;
 	// printf("\x1b[31mThread %d releasing lock on buffer %d %d\x1b[0m\r\n", thread_id, buffer_id1, buffer_id2);
 	omp_unset_lock(lock);
 }
