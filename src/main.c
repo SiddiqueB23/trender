@@ -4,8 +4,7 @@
 #include "raycast.h"
 #include <math.h>
 #include <stdlib.h>
-
-//#define RESOURCES_PATH "../resources/"
+#include <string.h>
 
 void update_matrices(mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix,
 	render_params_t* params) {
@@ -26,9 +25,7 @@ void update_model_matrix(mat4 model_matrix) {
 	glm_translate(model_matrix, (vec3) { translate_x, translate_y, translate_z });
 }
 
-//float camera_x = 0.0f, camera_y = 2.0f, camera_z = -1.49999988f;
-float camera_x = 0.0f, camera_y = 0.0f, camera_z = -2.0f;
-//float camera_x = -5.0f, camera_y = 12.0f, camera_z = -10.0f;
+float camera_x = 0.0f, camera_y = 0.0f, camera_z = -3.0f;
 float camera_pitch = 0.0f, camera_yaw = 0.0f;
 
 void update_view_matrix(mat4 view_matrix) {
@@ -101,22 +98,6 @@ void cleanup(void) {
 
 int mousex = 0, mousey = 0;
 
-void draw_square(framebuffer_4i8* fb, int x, int y, int width, int screen_width, int screen_height) {
-	for (int i = y; i < y + width && i < screen_height; i++) {
-		for (int j = x; j < x + width && j < screen_width; j++) {
-			set_pixel_4i8(fb, j, i, 255, 0, 0, 255);
-		}
-	}
-}
-
-int compare_uint64_t(const void* a, const void* b) {
-	uint64_t val_a = *(const uint64_t*)a;
-	uint64_t val_b = *(const uint64_t*)b;
-	if (val_a < val_b) return -1;
-	else if (val_a > val_b) return 1;
-	else return 0;
-}
-
 void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float* maxx, float* maxy, float* maxz) {
 	*minx = FLT_MAX;
 	*miny = FLT_MAX;
@@ -138,35 +119,128 @@ void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float
 	}
 }
 
+/* =========================================================== */
+/*  CLI                                                        */
+/* =========================================================== */
+
+typedef struct {
+	char obj_path[512];
+	char testmodel[64];  /* name of a built-in test model, e.g. "bmw" */
+	int  width;          /* output pixel width  (0 = default 960)     */
+	int  height;         /* output pixel height (0 = default 540)     */
+	int  frames;         /* frames to render    (0 = auto)            */
+	int  interactive;    /* enable camera controls + HUD              */
+	int  rotate;         /* auto-rotate model each frame              */
+	int  verbose;        /* print diagnostic / timing output          */
+} cli_args_t;
+
+static void print_usage(const char* prog) {
+	fprintf(stderr, "Usage: %s [options] model.obj\r\n", prog);
+	fprintf(stderr, "       %s [options] --testmodel=<name>\r\n", prog);
+	fprintf(stderr, "Options:\r\n");
+	fprintf(stderr, "  -W, --width N         Output width in pixels  (default: 960)\r\n");
+	fprintf(stderr, "  -H, --height N        Output height in pixels (default: 540)\r\n");
+	fprintf(stderr, "  -n, --frames N        Number of frames to render (default: 1)\r\n");
+	fprintf(stderr, "  -i, --interactive     Interactive mode with camera controls\r\n");
+	fprintf(stderr, "  -r, --rotate          Auto-rotate the model\r\n");
+	fprintf(stderr, "  -v, --verbose         Print diagnostic and timing output\r\n");
+	fprintf(stderr, "      --testmodel=NAME  Use a built-in test model (e.g. bmw)\r\n");
+	fprintf(stderr, "  -h, --help            Show this help\r\n");
+}
+
+static int parse_args(int argc, char* argv[], cli_args_t* args) {
+	args->obj_path[0]  = '\0';
+	args->testmodel[0] = '\0';
+	args->width        = 0;
+	args->height       = 0;
+	args->frames       = 0;
+	args->interactive  = 0;
+	args->rotate       = 0;
+	args->verbose      = 0;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+			return -1;
+		} else if ((strcmp(argv[i], "--width") == 0 || strcmp(argv[i], "-W") == 0) && i + 1 < argc) {
+			args->width = atoi(argv[++i]);
+		} else if ((strcmp(argv[i], "--height") == 0 || strcmp(argv[i], "-H") == 0) && i + 1 < argc) {
+			args->height = atoi(argv[++i]);
+		} else if ((strcmp(argv[i], "--frames") == 0 || strcmp(argv[i], "-n") == 0) && i + 1 < argc) {
+			args->frames = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
+			args->interactive = 1;
+		} else if (strcmp(argv[i], "--rotate") == 0 || strcmp(argv[i], "-r") == 0) {
+			args->rotate = 1;
+		} else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+			args->verbose = 1;
+		} else if (strncmp(argv[i], "--testmodel=", 12) == 0) {
+			strncpy(args->testmodel, argv[i] + 12, sizeof(args->testmodel) - 1);
+			args->testmodel[sizeof(args->testmodel) - 1] = '\0';
+		} else if (argv[i][0] != '-') {
+			strncpy(args->obj_path, argv[i], sizeof(args->obj_path) - 1);
+			args->obj_path[sizeof(args->obj_path) - 1] = '\0';
+		} else {
+			fprintf(stderr, "trender: unknown option '%s'\r\n", argv[i]);
+			return -1;
+		}
+	}
+
+	if (args->testmodel[0] != '\0' && args->obj_path[0] == '\0') {
+		snprintf(args->obj_path, sizeof(args->obj_path),
+		         RESOURCES_PATH "%s/%s.obj", args->testmodel, args->testmodel);
+	}
+
+	if (args->obj_path[0] == '\0') {
+		fprintf(stderr, "trender: no input file specified\r\n");
+		return -1;
+	}
+
+	if (args->frames == 0)
+		args->frames = args->interactive ? 100000 : 1;
+
+	return 0;
+}
+
+/* =========================================================== */
+
 int keep_running = 1;
 
-int main(void) {
+int main(int argc, char* argv[]) {
 
 	tio_init(&tio_ctx);
 	atexit(cleanup);
-	printf("\x1b[2J");   // Clear screen
-	printf("\x1b[H");    // Move cursor to home
-	printf("\x1b[?25l"); // Hide cursor
-	fflush(stdout);
 
-	//char obj_path[128] = RESOURCES_PATH "Grass_Block.obj";
-   //char obj_path[128] = RESOURCES_PATH "DabrovikSponza/sponza.obj";
-   //char obj_path[128] = RESOURCES_PATH "lost-empire/lost_empire.obj";
-	char obj_path[128] = RESOURCES_PATH "bmw/bmw.obj";
-	mesh_t mesh;
-	int ret = load_obj(obj_path, &mesh);
-	if (ret != 0) {
-		fprintf(stderr, "Failed to load mesh: %d\r\nFilepath: %s\r\n", ret, obj_path);
+	cli_args_t args;
+	if (parse_args(argc, argv, &args) != 0) {
+		print_usage(argv[0]);
 		return 1;
 	}
 
-	print_material_info(mesh.materials, mesh.num_materials);
+	if (args.interactive) {
+		printf("\x1b[2J");   // Clear screen
+		printf("\x1b[H");    // Move cursor to home
+	}
+	printf("\x1b[?25l"); // Hide cursor
+	fflush(stdout);
+
+	mesh_t mesh;
+	int ret = load_obj(args.obj_path, &mesh);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to load mesh: %d\r\nFilepath: %s\r\n", ret, args.obj_path);
+		return 1;
+	}
+
+	if (args.verbose) {
+		print_material_info(mesh.materials, mesh.num_materials);
+	}
 
 	float minx, miny, minz, maxx, maxy, maxz;
 	get_bounding_box(&mesh, &minx, &miny, &minz, &maxx, &maxy, &maxz);
-	printf("Mesh bounding box:\r\n");
-	printf("  Min: (%.2f, %.2f, %.2f)\r\n", minx, miny, minz);
-	printf("  Max: (%.2f, %.2f, %.2f)\r\n", maxx, maxy, maxz);
+	if (args.verbose) {
+		printf("Mesh bounding box:\r\n");
+		printf("  Min: (%.2f, %.2f, %.2f)\r\n", minx, miny, minz);
+		printf("  Max: (%.2f, %.2f, %.2f)\r\n", maxx, maxy, maxz);
+	}
 	translate_x = -(minx + maxx) / 2.0f;
 	translate_y = -(miny + maxy) / 2.0f;
 	translate_z = -(minz + maxz) / 2.0f;
@@ -180,12 +254,11 @@ int main(void) {
 		fprintf(stderr, "Unable to get window size\r\n");
 		return 1;
 	}
-	printf("Window size: %d rows, %d cols\r\n", rows, cols);
-	rows *= 2;
-	rows *= 5;
-	cols *= 5;
-	rows = 540;
-	cols = 960;
+	if (args.verbose) {
+		printf("Window size: %d rows, %d cols\r\n", rows, cols);
+	}
+	rows = (args.height > 0) ? args.height : 540;
+	cols = (args.width  > 0) ? args.width  : 960;
 	rows -= rows % 6;
 	cols -= cols % 8;
 
@@ -217,7 +290,7 @@ int main(void) {
 #pragma omp parallel num_threads(NUM_THREADS) default(shared)
 	{
 		int thread_id = omp_get_thread_num();
-		int num_frames = 500;
+		int num_frames = args.frames;
 		int num_frame_counter = num_frames;
 		trender_generate_frame(&ctx, &mesh, render_params, thread_id, 0);
 #pragma omp barrier
@@ -238,54 +311,58 @@ int main(void) {
 			}
 			if (thread_id == 0)
 			{
-				int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
-				int event_bytes_processed = 0;
-				while (event_bytes_processed < current_event_queue_bytes_size) {
-					tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
-					int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
-					event_bytes_processed += bytes_processed;
-					if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-						if (event.code == UPPERCASE_Q || event.code == CTRL_Q) {
+				if (args.interactive) {
+					int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
+					int event_bytes_processed = 0;
+					while (event_bytes_processed < current_event_queue_bytes_size) {
+						tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
+						int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
+						event_bytes_processed += bytes_processed;
+						if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
+							if (event.code == UPPERCASE_Q || event.code == CTRL_Q) {
 #pragma omp critical
-							{
-								keep_running = 0;
+								{
+									keep_running = 0;
+								}
+								break;
 							}
-							break;
-						}
-						switch (event.code) {
-						case 'w':
-						case 'a':
-						case 's':
-						case 'd':
-						case 'q':
-						case 'e':
-						case ARROW_UP:
-						case ARROW_DOWN:
-						case ARROW_RIGHT:
-						case ARROW_LEFT:
-							first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, &render_params);
-							break;
-						}
-					}
-					else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
-						mousex = 10 * event.position_x;
-						mousey = 20 * event.position_y;
-						mousex = clamp_int(mousex, 0, cols - 1);
-						mousey = clamp_int(mousey, 0, cols - 1);
-						if (event.code == LMB_DOWN) {
-							hit_triangle_idx = ray_cast(&mesh, render_params.model_view, mousex, mousey, cols, rows);
-							if (hit_triangle_idx == -1) {
-								mesh.start_triangle_index = 0;
-								mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+							switch (event.code) {
+							case 'w':
+							case 'a':
+							case 's':
+							case 'd':
+							case 'q':
+							case 'e':
+							case ARROW_UP:
+							case ARROW_DOWN:
+							case ARROW_RIGHT:
+							case ARROW_LEFT:
+								first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, &render_params);
+								break;
 							}
-							else {
-								mesh.start_triangle_index = hit_triangle_idx;
-								mesh.end_triangle_index = hit_triangle_idx + 1;
+						}
+						else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
+							mousex = 10 * event.position_x;
+							mousey = 20 * event.position_y;
+							mousex = clamp_int(mousex, 0, cols - 1);
+							mousey = clamp_int(mousey, 0, cols - 1);
+							if (event.code == LMB_DOWN) {
+								hit_triangle_idx = ray_cast(&mesh, render_params.model_view, mousex, mousey, cols, rows);
+								if (hit_triangle_idx == -1) {
+									mesh.start_triangle_index = 0;
+									mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+								}
+								else {
+									mesh.start_triangle_index = hit_triangle_idx;
+									mesh.end_triangle_index = hit_triangle_idx + 1;
+								}
 							}
 						}
 					}
 				}
-				rotate_angle += 1.0f;
+				if (args.rotate) {
+					rotate_angle += 1.0f;
+				}
 				update_model_matrix(model_matrix);
 			}
 #pragma omp critical
@@ -304,16 +381,17 @@ int main(void) {
 				processing_time = fmaxf(0.0f, frame_time - ctx.display_time);
 				total_processing_time += processing_time;
 
-				printf("\x1b[H");    // Move cursor to home
-				printf("\r\n");
-				//printf("Mouse: (%d, %d)              \r\n", mousex, mousey);
-				printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
-				printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
-				printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", camera_x, camera_y, camera_z);
-				printf("Processing:    %0.2f    \r\n", processing_time);
-				printf("Display:       %0.2f    \r\n", ctx.display_time);
-				printf("Frame time:    %0.2f    \r\n", frame_time);
-				fflush(stdout);
+				if (args.interactive) {
+					printf("\x1b[H");    // Move cursor to home
+					printf("\r\n");
+					printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
+					printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
+					printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", camera_x, camera_y, camera_z);
+					printf("Processing:    %0.2f    \r\n", processing_time);
+					printf("Display:       %0.2f    \r\n", ctx.display_time);
+					printf("Frame time:    %0.2f    \r\n", frame_time);
+					fflush(stdout);
+				}
 			}
 		}
 		if (thread_id == 0) {
@@ -331,32 +409,40 @@ int main(void) {
 				}
 				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[NUM_THREADS - 2]][NUM_THREADS - 2], 0, ctx.front[NUM_THREADS - 2], NUM_THREADS - 2);
 			}
-			printf("\r\n");
-			printf("Total times:\r\n");
-			printf("Processing:    %0.2f\r\n", total_processing_time);
-			printf("Display:       %0.2f\r\n", ctx.total_display_time);
-			printf("Frame time:    %0.2f\r\n", total_frame_time);
-			printf("Average times:\r\n");
-			printf("Processing:    %0.2f\r\n", total_processing_time / (float)num_frames);
-			printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)num_frames);
-			printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
+			if (args.verbose) {
+				printf("\r\n");
+				printf("Total times:\r\n");
+				printf("Processing:    %0.2f\r\n", total_processing_time);
+				printf("Display:       %0.2f\r\n", ctx.total_display_time);
+				printf("Frame time:    %0.2f\r\n", total_frame_time);
+				printf("Average times:\r\n");
+				printf("Processing:    %0.2f\r\n", total_processing_time / (float)num_frames);
+				printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)num_frames);
+				printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
+			}
 		}
 
 		if (NUM_THREADS >= 2 && thread_id >= 1) {
 			unset_lock_with_debug(&ctx.buffer_locks[ctx.back[thread_id - 1]][thread_id - 1], thread_id, ctx.back[thread_id - 1], thread_id - 1);
 		}
-		printf("%d exited loop\r\n", thread_id);
-		fflush(stdout);
+		if (args.verbose) {
+			printf("%d exited loop\r\n", thread_id);
+			fflush(stdout);
+		}
 	}
 
-	printf("All threads joined\r\n");
-	double whole_time = timer_elapsed_ms(&timer_whole);
-	trender_print_stats(&ctx, whole_time);
+	if (args.verbose) {
+		printf("All threads joined\r\n");
+		double whole_time = timer_elapsed_ms(&timer_whole);
+		trender_print_stats(&ctx, whole_time);
+	}
 
 	fflush(stdout);
-	//tinyobj_attrib_free(&(mesh.attrib));
-	//tinyobj_shapes_free(mesh.shapes, mesh.num_shapes);
 
+	if (!args.interactive) {
+		/* Move cursor below the rendered image so the shell prompt appears cleanly */
+		printf("\x1b[%d;1H\r\n", rows / 6 + 2);
+	}
 	printf("\x1b[?25h"); // Show cursor
 	fflush(stdout);
 
