@@ -25,7 +25,7 @@ void update_model_matrix(mat4 model_matrix) {
 	glm_translate(model_matrix, (vec3) { translate_x, translate_y, translate_z });
 }
 
-float camera_x = 0.0f, camera_y = 0.0f, camera_z = -3.0f;
+float camera_x = 0.0f, camera_y = 0.0f, camera_z = 0.0f;
 float camera_pitch = 0.0f, camera_yaw = 0.0f;
 
 void update_view_matrix(mat4 view_matrix) {
@@ -132,6 +132,8 @@ typedef struct {
 	int  interactive;    /* enable camera controls + HUD              */
 	int  rotate;         /* auto-rotate model each frame              */
 	int  verbose;        /* print diagnostic / timing output          */
+	int  center;         /* translate model so bounding box is at origin */
+	int  autofit;        /* center + scale model and set camera dist  */
 } cli_args_t;
 
 static void print_usage(const char* prog) {
@@ -144,6 +146,8 @@ static void print_usage(const char* prog) {
 	fprintf(stderr, "  -i, --interactive     Interactive mode with camera controls\r\n");
 	fprintf(stderr, "  -r, --rotate          Auto-rotate the model\r\n");
 	fprintf(stderr, "  -v, --verbose         Print diagnostic and timing output\r\n");
+	fprintf(stderr, "  -c, --center          Translate model so its bounding box is at origin\r\n");
+	fprintf(stderr, "  -f, --autofit         Center, scale model and set camera distance\r\n");
 	fprintf(stderr, "      --testmodel=NAME  Use a built-in test model (e.g. bmw)\r\n");
 	fprintf(stderr, "  -h, --help            Show this help\r\n");
 }
@@ -157,6 +161,8 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 	args->interactive  = 0;
 	args->rotate       = 0;
 	args->verbose      = 0;
+	args->center       = 0;
+	args->autofit      = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -173,6 +179,10 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 			args->rotate = 1;
 		} else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
 			args->verbose = 1;
+		} else if (strcmp(argv[i], "--center") == 0 || strcmp(argv[i], "-c") == 0) {
+			args->center = 1;
+		} else if (strcmp(argv[i], "--autofit") == 0 || strcmp(argv[i], "-f") == 0) {
+			args->autofit = 1;
 		} else if (strncmp(argv[i], "--testmodel=", 12) == 0) {
 			strncpy(args->testmodel, argv[i] + 12, sizeof(args->testmodel) - 1);
 			args->testmodel[sizeof(args->testmodel) - 1] = '\0';
@@ -207,48 +217,47 @@ int keep_running = 1;
 
 int main(int argc, char* argv[]) {
 
-	tio_init(&tio_ctx);
-	atexit(cleanup);
-
 	cli_args_t args;
 	if (parse_args(argc, argv, &args) != 0) {
 		print_usage(argv[0]);
 		return 1;
 	}
-
-	if (args.interactive) {
-		printf("\x1b[2J");   // Clear screen
-		printf("\x1b[H");    // Move cursor to home
-	}
-	printf("\x1b[?25l"); // Hide cursor
-	fflush(stdout);
-
+	
 	mesh_t mesh;
 	int ret = load_obj(args.obj_path, &mesh);
 	if (ret != 0) {
 		fprintf(stderr, "Failed to load mesh: %d\r\nFilepath: %s\r\n", ret, args.obj_path);
 		return 1;
 	}
-
+	
 	if (args.verbose) {
 		print_material_info(mesh.materials, mesh.num_materials);
 	}
-
-	float minx, miny, minz, maxx, maxy, maxz;
-	get_bounding_box(&mesh, &minx, &miny, &minz, &maxx, &maxy, &maxz);
-	if (args.verbose) {
-		printf("Mesh bounding box:\r\n");
-		printf("  Min: (%.2f, %.2f, %.2f)\r\n", minx, miny, minz);
-		printf("  Max: (%.2f, %.2f, %.2f)\r\n", maxx, maxy, maxz);
+	
+	if (args.center || args.autofit) {
+		float minx, miny, minz, maxx, maxy, maxz;
+		get_bounding_box(&mesh, &minx, &miny, &minz, &maxx, &maxy, &maxz);
+		if (args.verbose) {
+			printf("Mesh bounding box:\r\n");
+			printf("  Min: (%.2f, %.2f, %.2f)\r\n", minx, miny, minz);
+			printf("  Max: (%.2f, %.2f, %.2f)\r\n", maxx, maxy, maxz);
+		}
+		translate_x = -(minx + maxx) / 2.0f;
+		translate_y = -(miny + maxy) / 2.0f;
+		translate_z = -(minz + maxz) / 2.0f;
+		if (args.autofit) {
+			float largest_extent = fabsf(max_float(max_float((float)(maxx - minx), (float)(maxy - miny)), (float)(maxz - minz)));
+			scale_x = 2.0f / largest_extent;
+			scale_y = 2.0f / largest_extent;
+			scale_z = 2.0f / largest_extent;
+			float sx = (maxx - minx) * scale_x;
+			float sy = (maxy - miny) * scale_y;
+			float sz = (maxz - minz) * scale_z;
+			float half_max = 0.5f * max_float(max_float(sx, sy), sz);
+			camera_z = -(half_max / tanf(glm_rad(45.0f)) + sz * 0.5f + near_plane);
+		}
 	}
-	translate_x = -(minx + maxx) / 2.0f;
-	translate_y = -(miny + maxy) / 2.0f;
-	translate_z = -(minz + maxz) / 2.0f;
-	float largest_extent = fabsf(max_float(max_float((float)(maxx - minx), (float)(maxy - miny)), (float)(maxz - minz)));
-	scale_x = 2.0f / largest_extent;
-	scale_y = 2.0f / largest_extent;
-	scale_z = 2.0f / largest_extent;
-
+	
 	int rows = 0, cols = 0;
 	if (tio_get_window_size(&tio_ctx, &rows, &cols) == -1) {
 		fprintf(stderr, "Unable to get window size\r\n");
@@ -261,33 +270,43 @@ int main(int argc, char* argv[]) {
 	cols = (args.width  > 0) ? args.width  : 960;
 	rows -= rows % 6;
 	cols -= cols % 8;
-
+	
 	mat4 model_matrix, view_matrix, projection_matrix;
 	render_params_t render_params;
 	glm_mat4_identity(projection_matrix);
 	glm_translate(view_matrix, (vec3) { 0.0f, 0.0f, 0.0f });
 	glm_perspective(glm_rad(90.0f), (float)cols / (float)rows, near_plane, far_plane, projection_matrix);
-
+	
 	update_model_matrix(model_matrix);
 	update_view_matrix(view_matrix);
 	update_matrices(model_matrix, view_matrix, projection_matrix, &render_params);
 
+	tio_init(&tio_ctx);
+	atexit(cleanup);
+
+	if (args.interactive) {
+		printf("\x1b[2J");   // Clear screen
+		printf("\x1b[H");    // Move cursor to home
+	}
+	printf("\x1b[?25l"); // Hide cursor
+	fflush(stdout);
+	
 	trender_ctx_t ctx;
 	trender_ctx_init(&ctx, rows, cols);
-
+	
 	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
-
+	
 	double total_processing_time = 0.0;
 	double processing_time = 0.0;
 	double previous_end_time = timer_elapsed_ms(&timer_whole);
 	double frame_time = 0.0;
 	double total_frame_time = 0.0;
 	double current_end_time = 0.0;
-
+	
 	int hit_triangle_idx = -1;
-
-#pragma omp parallel num_threads(NUM_THREADS) default(shared)
+	
+	#pragma omp parallel num_threads(NUM_THREADS) default(shared)
 	{
 		int thread_id = omp_get_thread_num();
 		int num_frames = args.frames;
