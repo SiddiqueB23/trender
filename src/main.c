@@ -134,6 +134,8 @@ typedef struct {
 	int  verbose;        /* print diagnostic / timing output          */
 	int  center;         /* translate model so bounding box is at origin */
 	int  autofit;        /* center + scale model and set camera dist  */
+	int  threads;        /* number of OMP threads (default 2)         */
+	int  buffers;        /* triple-buffer count   (default 3)         */
 } cli_args_t;
 
 static void print_usage(const char* prog) {
@@ -148,6 +150,8 @@ static void print_usage(const char* prog) {
 	fprintf(stderr, "  -v, --verbose         Print diagnostic and timing output\r\n");
 	fprintf(stderr, "  -c, --center          Translate model so its bounding box is at origin\r\n");
 	fprintf(stderr, "  -f, --autofit         Center, scale model and set camera distance\r\n");
+	fprintf(stderr, "  -t, --threads N       Number of threads (default: 2)\r\n");
+	fprintf(stderr, "  -B, --buffers N       Buffer count      (default: 3)\r\n");
 	fprintf(stderr, "      --testmodel=NAME  Use a built-in test model (e.g. bmw)\r\n");
 	fprintf(stderr, "  -h, --help            Show this help\r\n");
 }
@@ -163,6 +167,8 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 	args->verbose      = 0;
 	args->center       = 0;
 	args->autofit      = 0;
+	args->threads      = 2;
+	args->buffers      = 3;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -183,6 +189,10 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 			args->center = 1;
 		} else if (strcmp(argv[i], "--autofit") == 0 || strcmp(argv[i], "-f") == 0) {
 			args->autofit = 1;
+		} else if ((strcmp(argv[i], "--threads") == 0 || strcmp(argv[i], "-t") == 0) && i + 1 < argc) {
+			args->threads = atoi(argv[++i]);
+		} else if ((strcmp(argv[i], "--buffers") == 0 || strcmp(argv[i], "-B") == 0) && i + 1 < argc) {
+			args->buffers = atoi(argv[++i]);
 		} else if (strncmp(argv[i], "--testmodel=", 12) == 0) {
 			strncpy(args->testmodel, argv[i] + 12, sizeof(args->testmodel) - 1);
 			args->testmodel[sizeof(args->testmodel) - 1] = '\0';
@@ -207,6 +217,13 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 
 	if (args->frames == 0)
 		args->frames = args->interactive ? 100000 : 1;
+
+	if (args->threads == 1) {
+		args->buffers = 1;
+	} else if (args->buffers < 3) {
+		fprintf(stderr, "trender: --buffers must be at least 3 when using multiple threads (deadlock risk)\r\n");
+		return -1;
+	}
 
 	return 0;
 }
@@ -292,7 +309,8 @@ int main(int argc, char* argv[]) {
 	fflush(stdout);
 	
 	trender_ctx_t ctx;
-	trender_ctx_init(&ctx, rows, cols);
+	if (trender_ctx_init(&ctx, rows, cols, args.threads, args.buffers) != 0)
+		return 1;
 	
 	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
@@ -306,16 +324,16 @@ int main(int argc, char* argv[]) {
 	
 	int hit_triangle_idx = -1;
 	
-	#pragma omp parallel num_threads(NUM_THREADS) default(shared)
+#pragma omp parallel num_threads(args.threads) default(shared)
 	{
 		int thread_id = omp_get_thread_num();
 		int num_frames = args.frames;
 		int num_frame_counter = num_frames;
 		trender_generate_frame(&ctx, &mesh, render_params, thread_id, 0);
 #pragma omp barrier
-		if (NUM_THREADS >= 2 && thread_id == 0) {
-			for (int i = 0;i < NUM_THREADS - 1;i++) {
-				set_lock_with_debug(&ctx.buffer_locks[ctx.front[i]][i], thread_id, ctx.front[i], i);
+		if (ctx.num_threads >= 2 && thread_id == 0) {
+			for (int i = 0; i < ctx.num_threads - 1; i++) {
+				set_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), thread_id, ctx.front[i], i);
 			}
 		}
 #pragma omp barrier
@@ -418,15 +436,13 @@ int main(int argc, char* argv[]) {
 			{
 				keep_running = 0;
 			}
-			if (NUM_THREADS == 2) {
-				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[0]][0], 0, ctx.front[0], 0);
+			if (ctx.num_threads == 2) {
+				unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[0], 0), 0, ctx.front[0], 0);
 			}
-			else if (NUM_THREADS >= 3) {
-				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[0]][0], 0, ctx.front[0], 0);
-				for (int i = 1; i < NUM_THREADS - 2; i++) {
-					unset_lock_with_debug(&ctx.buffer_locks[ctx.front[i]][i], 0, ctx.front[i], i);
+			else if (ctx.num_threads >= 3) {
+				for (int i = 0; i < ctx.num_threads - 1; i++) {
+					unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), 0, ctx.front[i], i);
 				}
-				unset_lock_with_debug(&ctx.buffer_locks[ctx.front[NUM_THREADS - 2]][NUM_THREADS - 2], 0, ctx.front[NUM_THREADS - 2], NUM_THREADS - 2);
 			}
 			if (args.verbose) {
 				printf("\r\n");
@@ -441,8 +457,8 @@ int main(int argc, char* argv[]) {
 			}
 		}
 
-		if (NUM_THREADS >= 2 && thread_id >= 1) {
-			unset_lock_with_debug(&ctx.buffer_locks[ctx.back[thread_id - 1]][thread_id - 1], thread_id, ctx.back[thread_id - 1], thread_id - 1);
+		if (ctx.num_threads >= 2 && thread_id >= 1) {
+			unset_lock_with_debug(buffer_lock_at(&ctx, ctx.back[thread_id - 1], thread_id - 1), thread_id, ctx.back[thread_id - 1], thread_id - 1);
 		}
 		if (args.verbose) {
 			printf("%d exited loop\r\n", thread_id);
