@@ -304,7 +304,6 @@ void convert_4i8_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors2
 typedef uint64_t sixel_column_t;
 
 typedef struct {
-	sixel_indexed_bitmap* bitmap;
 	char* data;
 	char* header_data;
 	char* sixel_data;
@@ -312,19 +311,20 @@ typedef struct {
 	int header_data_size;
 	int data_size;
 	int sixel_data_size;
+	int scale_x, scale_y;
 	double total_generation_time;
 	double total_conversion_time;
 	monotonic_timer_t timer;
-	int scale_x, scale_y;
-	int painted[2048];
-	sixel_column_t transposed[2048];
+	sixel_indexed_bitmap* bitmap;
+	int*            painted;     /* scratch: per-column painted mask  */
+	sixel_column_t* transposed;  /* scratch: transposed column data   */
 } sixel_display_ctx;
 
 void init_sixel_display_ctx(sixel_display_ctx* ctx, int width, int height) {
 	ctx->scale_x = 1;
 	ctx->scale_y = 1;
 	ctx->bitmap = NULL;
-	ctx->data = (char*)malloc((width * height * 8 * ctx->scale_y) + 1024);
+	ctx->data = (char*)malloc((width * height * 5 * ctx->scale_y) + 1024);
 	ctx->header_data = ctx->data;
 	ctx->sixel_data = NULL;
 	ctx->header_valid = 0;
@@ -332,6 +332,28 @@ void init_sixel_display_ctx(sixel_display_ctx* ctx, int width, int height) {
 	ctx->data_size = 0;
 	ctx->total_conversion_time = 0.0;
 	ctx->total_generation_time = 0.0;
+	ctx->painted    = NULL;
+	ctx->transposed = NULL;
+}
+
+/* Heap-allocate scratch buffers owned by this ctx. */
+void sixel_display_ctx_alloc_scratch(sixel_display_ctx* ctx) {
+	ctx->painted    = (int*)           malloc(2048 * sizeof(int));
+	ctx->transposed = (sixel_column_t*)malloc(2048 * sizeof(sixel_column_t));
+}
+
+/* Point this ctx's scratch at another ctx's already-allocated scratch. */
+void sixel_display_ctx_use_scratch_of(sixel_display_ctx* ctx, sixel_display_ctx* src) {
+	ctx->painted    = src->painted;
+	ctx->transposed = src->transposed;
+}
+
+/* Free scratch buffers owned by this ctx. Do NOT call on a ctx that borrows scratch. */
+void sixel_display_ctx_free_scratch(sixel_display_ctx* ctx) {
+	free(ctx->painted);
+	free(ctx->transposed);
+	ctx->painted    = NULL;
+	ctx->transposed = NULL;
 }
 
 void free_sixel_display_ctx(sixel_display_ctx* ctx) {
@@ -377,25 +399,6 @@ void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colo
 	}
 	ctx->total_conversion_time += timer_elapsed_ms(&ctx->timer);
 }
-//
-//alignas(64) const uint16_t BAYER_PATTERN_16X16_DIVIDED_BY_5_u16[16][16] = { //	16x16 Bayer Dithering Matrix.  Color levels: 256
-//{  0 ,  38 ,   9 ,  47 ,   2 ,  40 ,  12 ,  50 ,   0 ,  38 ,  10 ,  48 ,   3 ,  41 ,  12 ,  50 },
-//{ 25 ,  12 ,  35 ,  22 ,  27 ,  15 ,  37 ,  24 ,  26 ,  13 ,  35 ,  23 ,  28 ,  15 ,  38 ,  25 },
-//{  6 ,  44 ,   3 ,  41 ,   8 ,  47 ,   5 ,  43 ,   7 ,  45 ,   3 ,  42 ,   9 ,  47 ,   6 ,  44 },
-//{ 31 ,  19 ,  28 ,  16 ,  34 ,  21 ,  31 ,  18 ,  32 ,  19 ,  29 ,  16 ,  34 ,  22 ,  31 ,  19 },
-//{  1 ,  39 ,  11 ,  49 ,   0 ,  39 ,  10 ,  48 ,   2 ,  40 ,  11 ,  50 ,   1 ,  39 ,  11 ,  49 },
-//{ 27 ,  14 ,  36 ,  24 ,  26 ,  13 ,  35 ,  23 ,  27 ,  15 ,  37 ,  24 ,  26 ,  14 ,  36 ,  23 },
-//{  8 ,  46 ,   4 ,  43 ,   7 ,  45 ,   4 ,  42 ,   8 ,  46 ,   5 ,  43 ,   7 ,  46 ,   4 ,  42 },
-//{ 33 ,  20 ,  30 ,  17 ,  32 ,  20 ,  29 ,  16 ,  34 ,  21 ,  30 ,  18 ,  33 ,  20 ,  30 ,  17 },
-//{  0 ,  38 ,  10 ,  48 ,   2 ,  41 ,  12 ,  50 ,   0 ,  38 ,   9 ,  48 ,   2 ,  40 ,  12 ,  50 },
-//{ 25 ,  13 ,  35 ,  22 ,  28 ,  15 ,  37 ,  25 ,  25 ,  13 ,  35 ,  22 ,  28 ,  15 ,  37 ,  25 },
-//{  6 ,  45 ,   3 ,  41 ,   9 ,  47 ,   6 ,  44 ,   6 ,  44 ,   3 ,  41 ,   9 ,  47 ,   5 ,  44 },
-//{ 32 ,  19 ,  29 ,  16 ,  34 ,  22 ,  31 ,  18 ,  32 ,  19 ,  28 ,  16 ,  34 ,  21 ,  31 ,  18 },
-//{  2 ,  40 ,  11 ,  49 ,   1 ,  39 ,  10 ,  49 ,   1 ,  40 ,  11 ,  49 ,   1 ,  39 ,  10 ,  48 },
-//{ 27 ,  14 ,  37 ,  24 ,  26 ,  14 ,  36 ,  23 ,  27 ,  14 ,  36 ,  24 ,  26 ,  13 ,  36 ,  23 },
-//{  8 ,  46 ,   5 ,  43 ,   7 ,  45 ,   4 ,  42 ,   8 ,  46 ,   5 ,  43 ,   7 ,  45 ,   4 ,  42 },
-//{ 33 ,  21 ,  30 ,  18 ,  33 ,  20 ,  29 ,  17 ,  33 ,  21 ,  30 ,  17 ,  32 ,  20 ,  29 ,  17 },
-//};
 
 void convert_5r6g5b_to_sixel_indexed_bitmap_rgbuniform_ordered_dithering_216colors_avx2(sixel_display_ctx* ctx, framebuffer_u16 fb) {
 	sixel_indexed_bitmap* bitmap = ctx->bitmap;

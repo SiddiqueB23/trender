@@ -55,6 +55,11 @@ static inline void trender_ctx_init(trender_ctx_t* ctx, int rows, int cols) {
 			init_sixel_display_ctx(&ctx->sixel_ctx[b][0], cols, rows);
 			ctx->sixel_ctx[b][0].bitmap = bitmap;
 		}
+		/* Buffer 0 owns the scratch; the rest share it. */
+		sixel_display_ctx_alloc_scratch(&ctx->sixel_ctx[0][0]);
+		for (int b = 1; b < BUFFER_COUNT; b++) {
+			sixel_display_ctx_use_scratch_of(&ctx->sixel_ctx[b][0], &ctx->sixel_ctx[0][0]);
+		}
 	} else {
 		for (int i = 1; i < NUM_THREADS; i++) {
 			int starty = (rows * (i - 1)) / (NUM_THREADS - 1);
@@ -69,6 +74,11 @@ static inline void trender_ctx_init(trender_ctx_t* ctx, int rows, int cols) {
 			for (int b = 0; b < BUFFER_COUNT; b++) {
 				init_sixel_display_ctx(&ctx->sixel_ctx[b][i - 1], cols, rows_per_thread);
 				ctx->sixel_ctx[b][i - 1].bitmap = bitmap;
+			}
+			/* Buffer 0 owns the scratch for this thread; the rest share it. */
+			sixel_display_ctx_alloc_scratch(&ctx->sixel_ctx[0][i - 1]);
+			for (int b = 1; b < BUFFER_COUNT; b++) {
+				sixel_display_ctx_use_scratch_of(&ctx->sixel_ctx[b][i - 1], &ctx->sixel_ctx[0][i - 1]);
 			}
 		}
 	}

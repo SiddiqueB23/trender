@@ -99,7 +99,8 @@ int main(void) {
 		fflush(stdout);
 	}
 end:
-	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);
+
+	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);  
 	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_elapsed_ms);
 
 	printf("\x1b[?25h"); // Show cursor
