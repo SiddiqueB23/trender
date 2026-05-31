@@ -77,6 +77,13 @@ else()
   target_link_libraries(sixel_display_test PRIVATE ${EXTRA_LIBS})
 endif()
 
+add_executable(tio_gfx_sixel_test ${CMAKE_SOURCE_DIR}/src/tio_gfx_sixel_test.c)
+if(UNIX)
+  target_link_libraries(tio_gfx_sixel_test PRIVATE m ${RT_LIB} ${EXTRA_LIBS})
+else()
+  target_link_libraries(tio_gfx_sixel_test PRIVATE ${EXTRA_LIBS})
+endif()
+
 add_executable(timer_test ${CMAKE_SOURCE_DIR}/src/timer_test.c)
 if(UNIX)
   target_link_libraries(timer_test PRIVATE m ${RT_LIB} ${EXTRA_LIBS})

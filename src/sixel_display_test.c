@@ -1,109 +1,41 @@
-#include "sixel_display.h"
-#include "timer.h"
+#define TIO_GFX_SIXEL_IMPLEMENTATION
+#include "tio_gfx_sixel.h"
 #include "tio.h"
+#include "timer.h"
 #include <stdio.h>
 #include <stdlib.h>
 
-tio_ctx_t ctx;
-
-void cleanup(void) {
-	tio_destroy(&ctx);
-}
-
-void random_bitmap(sixel_indexed_bitmap* bitmap) {
-	for (int i = 0; i < bitmap->width * bitmap->height; i++) {
-		bitmap->index_data[i] = rand() % bitmap->palette.size;
-	}
-}
-
-void checkered_bitmap(sixel_indexed_bitmap* bitmap, int size, int color1, int color2) {
-	for (int y = 0;y < bitmap->height;y++) {
-		for (int x = 0;x < bitmap->width;x++) {
-			if (((x / size) % 2 + (y / size) % 2) % 2 == 0)
-				bitmap->index_data[y * bitmap->width + x] = color1;
-			else
-				bitmap->index_data[y * bitmap->width + x] = color2;
-		}
-	}
-}
-
-void random_squares_bitmap(sixel_indexed_bitmap* bitmap, int size) {
-	for (int y = 0;y < bitmap->height;y += size) {
-		for (int x = 0;x < bitmap->width;x += size) {
-			int color = rand() % bitmap->palette.size;
-			for (int i = 0;i < size && i + y < bitmap->height;i++) {
-				for (int j = 0;j < size && j + x < bitmap->width;j++) {
-					bitmap->index_data[(y + i) * bitmap->width + (x + j)] = color;
-				}
-			}
-		}
-	}
-}
+tio_ctx_t tio;
+void cleanup(void) { tio_destroy(&tio); }
 
 int main(void) {
+    tio_init(&tio);
+    atexit(cleanup);
+    printf("\x1b[2J\x1b[H\x1b[?25l");
+    fflush(stdout);
 
-	tio_init(&ctx);
-	atexit(cleanup);
-	printf("\x1b[2J");   // Clear screen
-	printf("\x1b[H");    // Move cursor to home
-	printf("\x1b[?25l"); // Hide cursor
-	fflush(stdout);
+    const int cols = 80 * 8, rows = 50 * 8;
+    tio_gfx_sixel_ctx ctx;
+    tio_gfx_sixel_init(&ctx, TIO_GFX_SIXEL_DEFAULT_PARAMS(cols, rows));
 
-	int rows, cols;
-	if (tio_get_window_size(&ctx, &rows, &cols) == -1) {
-		fprintf(stderr, "Unable to get window size\n");
-		return 1;
-	}
-	cols = 80;
-	rows = 50;
-	// rows -= 2;
-	rows *= 8;
-	cols *= 8;
-	printf("Window size: %d rows, %d cols\n", rows, cols);
+    unsigned char* pixels = (unsigned char*)malloc((size_t)(cols * rows * 4));
 
-	sixel_indexed_bitmap bitmap;
-	init_sixel_indexed_bitmap(&bitmap, cols, rows);
-	init_sixel_palette_rgbuniform(&bitmap.palette, 5);
-	sixel_display_ctx sixel_ctx;
-	init_sixel_display_ctx(&sixel_ctx, cols, rows);
-	sixel_ctx.bitmap = &bitmap;
+    monotonic_timer_t wall;
+    timer_start(&wall);
+    for (int frame = 0; frame < 100; frame++) {
+        for (int i = 0; i < cols * rows * 4; i++)
+            pixels[i] = (unsigned char)rand();
+        tio_gfx_sixel_generate(&ctx, pixels, TIO_GFX_FMT_RGBA8, TIO_GFX_FULL);
+        tio_write(&tio, ctx.data, ctx.data_size);
+        printf("\r\nframe %d  size=%zu bytes\r\n", frame, ctx.data_size);
+        fflush(stdout);
+    }
+    printf("\r\n100 frames in %.1f ms\r\n", timer_elapsed_ms(&wall));
+    tio_gfx_sixel_print_stats(&ctx);
 
-	monotonic_timer_t timer, timer_whole;
-	timer_start(&timer_whole);
-	int num_frames = 100;
-	while (num_frames--) {
-		//printf("\x1b[2J");   // Clear screen
-		//fflush(stdout);
-
-		timer_start(&timer);
-		//random_bitmap(sixel_ctx.bitmap);
-		random_squares_bitmap(sixel_ctx.bitmap, 1);
-		//checkered_bitmap(sixel_ctx.bitmap, 3, 50, 200);
-		double randomization_elapsed_ms = timer_elapsed_ms(&timer);
-
-		timer_start(&timer);
-		generate_sixel_display_data(&sixel_ctx);
-		double generation_elapsed_ms = timer_elapsed_ms(&timer);
-
-		timer_start(&timer);
-		if (tio_write(&ctx, sixel_ctx.data, sixel_ctx.data_size) == -1) {
-			goto end;
-		}
-		double display_elapsed_ms = timer_elapsed_ms(&timer);
-
-		printf("\r\n");
-		printf("Sixel Data Size: %d bytes\r\n", sixel_ctx.data_size);
-		printf("Randomization: %0.2f\r\n", randomization_elapsed_ms);
-		printf("Generation:    %0.2f\r\n", generation_elapsed_ms);
-		printf("Display:       %0.2f\r\n", display_elapsed_ms);
-		fflush(stdout);
-	}
-end:
-	printf("\r\n");
-	double whole_elapsed_ms = timer_elapsed_ms(&timer_whole);  
-	printf("\r\nTotal time for %d frames: %0.2f ms\r\n", 100, whole_elapsed_ms);
-
-	printf("\x1b[?25h"); // Show cursor
-	fflush(stdout);
-
+    free(pixels);
+    tio_gfx_sixel_destroy(&ctx);
+    printf("\x1b[?25h");
+    fflush(stdout);
+    return 0;
 }
