@@ -46,14 +46,54 @@ A CPU-only software 3D renderer that outputs directly to the terminal via Sixel 
 | AVX2 throughout | 8–32× throughput on the inner loops |
 | Sixel output | Works in any Sixel-capable terminal (iTerm2, kitty, etc.) |
 
-## Todo
+## Changelog
 
-- [x] Refactor input handling
-- [x] Fix ctrl+mouse move issue
-- [x] Add Ctrl+Fn keys support
-- [x] Add Windows support
-- [x] Refactor output handling
-- [ ] Add Alt+any keys support
-- [ ] Refactor `main.c`
-- [ ] Split sixel encoding and conversion to index bitmap
+**Rendering**
+- [x] Initial CPU rasterizer with sixel output
+- [x] Refactored rendering — separated rasterization, indexed bitmap conversion, and sixel encoding
+- [x] Experimented with triangle drawing approaches; settled on half-edge fixed-point
+- [x] Revamped material/texture loading to handle multiple materials; fixed artifacting
+- [x] AVX2 rasterizer — 8 pixels at a time with perspective-correct UV interpolation
+- [x] RGB565 framebuffer — halved memory bandwidth vs RGBA32
+- [x] Single diffuse texture atlas — no per-triangle texture switching
+- [x] Separate index buffer pass — depth test decoupled from texture sampling
+- [ ] Normal/specular map support
+- [ ] Lighting model
+
+**Performance**
+- [x] Multi-threading via OpenMP — thread 0 handles I/O, threads 1+ rasterize horizontal strips
+- [x] Triple-buffering with OMP locks between render and display threads
+- [x] Optimised buffer clearing and RGB565→indexed bitmap conversion
+- [x] AVX2-accelerated sixel palette quantization — 16–32 pixels at a time
+- [x] Reduced sixel context memory — scratch buffers heap-allocated and shared across buffer slots
+- [x] Thread and buffer count configurable at runtime (previously compile-time macros)
+- [ ] Work queue based multi-threading model — dynamic triangle distribution across threads instead of fixed horizontal strips
+
+**Platform & compatibility**
+- [x] CMake build system
+- [x] Windows support (`tio` input layer)
+- [x] Linux compatibility fixes
+- [x] Intel macOS support (libomp via Homebrew)
+- [x] GCC and Clang warning fixes
+
+**Input & interaction**
+- [x] Refactored input handling into `tio` / `tio_input` abstraction
+- [x] Ctrl+Fn, Ctrl+mouse, Ctrl+arrow key support
+- [x] Fixed Ctrl+mouse move bug
+- [x] First-person camera (WASD + QE + arrow keys)
+- [x] Left-click ray cast to isolate a triangle for debugging
+- [x] Q / Ctrl+Q to quit (fixed loop-exit bug)
+- [ ] Alt+key support
 - [ ] Experiment with different mouse reporting modes
+
+**CLI tool**
+- [x] CLI argument parsing — input file, resolution, frame count, interactive/rotate/verbose flags
+- [x] `--autofit` — auto-center and normalize model scale; compute camera distance from bounding box
+- [x] `--center` — translate bounding box to origin without scaling
+- [x] `--testmodel=<name>` — built-in test model shorthand
+- [x] Non-interactive single-frame mode suitable for use in shell pipelines
+- [ ] Split sixel encoding and palette conversion into separate modules
+- [ ] Kitty graphics protocol output
+- [ ] iTerm2 inline image protocol output
+- [ ] Block drawing characters output (Unicode half/quarter blocks)
+- [ ] ANSI art output (16/256-colour escape codes)
