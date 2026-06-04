@@ -195,19 +195,71 @@ int tio_write(tio_ctx_t* ctx, const void* buf, size_t count) {
 
 int tio_init(tio_ctx_t* ctx) {
 	ctx->input_handle = GetStdHandle(STD_INPUT_HANDLE);
-	DWORD input_mode;
-	GetConsoleMode(ctx->input_handle, &input_mode);
-	ctx->original_input_mode = input_mode;
-	input_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_QUICK_EDIT_MODE);
-	input_mode |= ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
-	SetConsoleMode(ctx->input_handle, input_mode);
+	if (ctx->input_handle == NULL || ctx->input_handle == INVALID_HANDLE_VALUE) {
+		/* Try to open the console input directly */
+		ctx->input_handle = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	}
+
+	DWORD input_mode = 0;
+	if (!GetConsoleMode(ctx->input_handle, &input_mode)) {
+		/* If we still can't get a console mode leave input_mode as 0 and continue.
+		 * Some environments (redirected output, pipes) won't have a console.
+		 */
+		ctx->original_input_mode = 0;
+	}
+	else {
+		ctx->original_input_mode = input_mode;
+		input_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_QUICK_EDIT_MODE);
+		input_mode |= ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
+		SetConsoleMode(ctx->input_handle, input_mode);
+	}
 
 	ctx->output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
-	DWORD output_mode;
-	GetConsoleMode(ctx->output_handle, &output_mode);
-	ctx->original_output_mode = output_mode;
-	output_mode |= (ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT);
-	SetConsoleMode(ctx->output_handle, output_mode);
+	if (ctx->output_handle == NULL || ctx->output_handle == INVALID_HANDLE_VALUE) {
+		/* Try to open the console output directly */
+		ctx->output_handle = CreateFileA("CONOUT$", GENERIC_WRITE,
+			FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	}
+
+	/* If still not valid, try to allocate a new console for this process and reopen handles. */
+	if ((ctx->input_handle == NULL || ctx->input_handle == INVALID_HANDLE_VALUE) &&
+		(ctx->output_handle == NULL || ctx->output_handle == INVALID_HANDLE_VALUE)) {
+		if (AllocConsole()) {
+			/* Reopen standard handles */
+			if (ctx->input_handle == NULL || ctx->input_handle == INVALID_HANDLE_VALUE)
+				ctx->input_handle = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE,
+					FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+			if (ctx->output_handle == NULL || ctx->output_handle == INVALID_HANDLE_VALUE)
+				ctx->output_handle = CreateFileA("CONOUT$", GENERIC_WRITE,
+					FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+		}
+	}
+
+	DWORD output_mode = 0;
+	if (!GetConsoleMode(ctx->output_handle, &output_mode)) {
+		DWORD err = GetLastError();
+		if (err == ERROR_INVALID_HANDLE) {
+			/* Try attaching to parent console and retry */
+			AttachConsole(ATTACH_PARENT_PROCESS);
+			ctx->output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+			if (!GetConsoleMode(ctx->output_handle, &output_mode)) {
+				ctx->original_output_mode = 0;
+			} else {
+				ctx->original_output_mode = output_mode;
+				output_mode |= (ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT);
+				SetConsoleMode(ctx->output_handle, output_mode);
+			}
+		}
+		else {
+			ctx->original_output_mode = 0;
+		}
+	}
+	else {
+		ctx->original_output_mode = output_mode;
+		output_mode |= (ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT);
+		SetConsoleMode(ctx->output_handle, output_mode);
+	}
 	return 0;
 }
 
@@ -229,8 +281,42 @@ int tio_get_window_size(tio_ctx_t* ctx, int* rows, int* cols) {
 	CONSOLE_SCREEN_BUFFER_INFO csbi;
 	if (!GetConsoleScreenBufferInfo(ctx->output_handle, &csbi)) {
 		DWORD err = GetLastError();
+		if (err == ERROR_INVALID_HANDLE) {
+			/* Try attaching to the parent console and retry */
+			AttachConsole(ATTACH_PARENT_PROCESS);
+			ctx->output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+			if (GetConsoleScreenBufferInfo(ctx->output_handle, &csbi)) {
+				*cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+				*rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+				return 0;
+			}
+			err = GetLastError();
+		}
+		/* Try to reopen the console output and retry once */
+		HANDLE h = CreateFileA("CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+		if (h != INVALID_HANDLE_VALUE && h != NULL) {
+			if (GetConsoleScreenBufferInfo(h, &csbi)) {
+				CloseHandle(h);
+				*cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+				*rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+				return 0;
+			}
+			CloseHandle(h);
+		}
+
+		/* As a last resort try to use the largest possible console window size */
+		COORD maxSize = GetLargestConsoleWindowSize(ctx->output_handle);
+		if (maxSize.X > 0 && maxSize.Y > 0) {
+			*cols = maxSize.X;
+			*rows = maxSize.Y;
+			return 0;
+		}
+
 		fprintf(stderr, "GetConsoleScreenBufferInfo failed: %lu\n", (unsigned long)err);
-		return -1;
+		/* As a last fallback, return a reasonable default size so caller can continue. */
+		*cols = 80;
+		*rows = 25;
+		return 0;
 	}
 	*cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 	*rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
