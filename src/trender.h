@@ -2,8 +2,8 @@
 
 #include "rendering_avx2_u16_mt.h"
 #define TIO_GFX_USE_AVX2
-#define TIO_GFX_SIXEL_IMPLEMENTATION
-#include "tio_gfx_sixel.h"
+#define TIO_GFX_IMPLEMENTATION
+#include "tio_gfx.h"
 #include "timer.h"
 #include "mesh_loading.h"
 #include "tio.h"
@@ -13,7 +13,7 @@
 
 typedef struct {
 	rendering_ctx_t*   render_ctx;   /* [num_render_ctx]                          */
-	tio_gfx_sixel_ctx* sixel_ctx;    /* flat [num_render_ctx * buffer_count]      */
+	tio_gfx_ctx*       gfx_ctx;      /* flat [num_render_ctx * buffer_count]      */
 	omp_lock_t*        buffer_locks; /* flat [buffer_count * num_render_ctx]      */
 	int*               front;        /* [num_render_ctx]                          */
 	int*               back;         /* [num_render_ctx]                          */
@@ -21,18 +21,19 @@ typedef struct {
 	int buffer_count;
 	int num_render_ctx;  /* max(1, num_threads - 1) */
 	int rows, cols;
+	tio_gfx_backend display_mode;
 	monotonic_timer_t timer;
 	double display_time;
 	double total_display_time;
 } trender_ctx_t;
 
 /*
- * Layout: sixel_ctx[i * buffer_count + b]  (thread-major, buffer-minor)
+ * Layout: gfx_ctx[i * buffer_count + b]  (thread-major, buffer-minor)
  * This keeps buffer slots for the same thread contiguous, so init_shared
  * can share scratch across buffer slots with a single pointer range.
  */
-static inline tio_gfx_sixel_ctx* sixel_ctx_at(trender_ctx_t* ctx, int b, int i) {
-	return &ctx->sixel_ctx[i * ctx->buffer_count + b];
+static inline tio_gfx_ctx* gfx_ctx_at(trender_ctx_t* ctx, int b, int i) {
+	return &ctx->gfx_ctx[i * ctx->buffer_count + b];
 }
 static inline omp_lock_t* buffer_lock_at(trender_ctx_t* ctx, int b, int i) {
 	return &ctx->buffer_locks[b * ctx->num_render_ctx + i];
@@ -49,7 +50,8 @@ static inline void unset_lock_with_debug(omp_lock_t* lock, int thread_id, int bu
 }
 
 static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
-	int num_threads, int buffer_count) {
+	int num_threads, int buffer_count, tio_gfx_backend display_mode,
+	tio_gfx_halfblock_color_mode hb_color_mode) {
 	if (num_threads == 1) {
 		buffer_count = 1;
 	} else if (buffer_count < 3) {
@@ -61,14 +63,18 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	ctx->num_threads      = num_threads;
 	ctx->buffer_count     = buffer_count;
 	ctx->num_render_ctx   = (num_threads == 1) ? 1 : (num_threads - 1);
+	ctx->display_mode     = display_mode;
 	ctx->display_time     = 0.0;
 	ctx->total_display_time = 0.0;
+
+	/* Strip boundary alignment: sixel bands are 6 rows tall; halfblock cells are 2 rows tall. */
+	int strip_align = (display_mode == TIO_GFX_BACKEND_SIXEL) ? 6 : 2;
 
 	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_render_ctx * sizeof(rendering_ctx_t));
 
 	if (num_threads == 1) {
-		/* Single-thread: one sixel context, no locks needed. */
-		ctx->sixel_ctx    = (tio_gfx_sixel_ctx*)malloc(sizeof(tio_gfx_sixel_ctx));
+		/* Single-thread: one gfx context, no locks needed. */
+		ctx->gfx_ctx      = (tio_gfx_ctx*)malloc(sizeof(tio_gfx_ctx));
 		ctx->buffer_locks = NULL;
 		ctx->front        = (int*)malloc(sizeof(int));
 		ctx->back         = (int*)malloc(sizeof(int));
@@ -76,14 +82,20 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		ctx->back[0]      = 0;
 
 		ctx->render_ctx[0] = create_rendering_ctx(cols, rows, 0, rows);
-		tio_gfx_sixel_init(sixel_ctx_at(ctx, 0, 0),
-		                   TIO_GFX_SIXEL_DEFAULT_PARAMS(cols, rows));
+		tio_gfx_params gp;
+		if (display_mode == TIO_GFX_BACKEND_SIXEL) {
+			gp = TIO_GFX_SIXEL_PARAMS(cols, rows);
+		} else {
+			gp = TIO_GFX_HALFBLOCK_PARAMS(cols, rows);
+			gp.p.halfblock.color_mode = hb_color_mode;
+		}
+		tio_gfx_init(gfx_ctx_at(ctx, 0, 0), gp);
 	} else {
 		/* Multi-thread: one ctx per (thread, buffer_slot) pair.
 		 * Layout is thread-major so init_shared can share scratch across
 		 * buffer slots of the same thread. */
-		ctx->sixel_ctx    = (tio_gfx_sixel_ctx*)malloc(
-		                        ctx->num_render_ctx * buffer_count * sizeof(tio_gfx_sixel_ctx));
+		ctx->gfx_ctx      = (tio_gfx_ctx*)malloc(
+		                        ctx->num_render_ctx * buffer_count * sizeof(tio_gfx_ctx));
 		ctx->buffer_locks = (omp_lock_t*)malloc(
 		                        buffer_count * ctx->num_render_ctx * sizeof(omp_lock_t));
 		ctx->front        = (int*)malloc(ctx->num_render_ctx * sizeof(int));
@@ -96,19 +108,22 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		for (int i = 1; i < num_threads; i++) {
 			int starty = (rows * (i - 1)) / (num_threads - 1);
 			int endy   = (rows * ((i - 1) + 1)) / (num_threads - 1);
-			starty -= starty % 6;
-			endy   -= endy   % 6;
+			starty -= starty % strip_align;
+			endy   -= endy   % strip_align;
 			int rows_per_thread = endy - starty;
 			ctx->render_ctx[i - 1] = create_rendering_ctx(cols, rows, starty, endy);
 
-			/* buffer_count ctxs for this thread share one scratch allocation.
-			 * dither_offset_y aligns the Bayer tile to this strip's position
-			 * in the full image. */
-			tio_gfx_sixel_params sp = TIO_GFX_SIXEL_DEFAULT_PARAMS(cols, rows_per_thread);
-			sp.dither_offset_y = starty;
-			tio_gfx_sixel_init_shared(
-			    ctx->sixel_ctx + (i - 1) * buffer_count,
-			    buffer_count, sp);
+			tio_gfx_params gp;
+			if (display_mode == TIO_GFX_BACKEND_SIXEL) {
+				gp = TIO_GFX_SIXEL_PARAMS(cols, rows_per_thread);
+				gp.p.sixel.dither_offset_y = starty;
+			} else {
+				gp = TIO_GFX_HALFBLOCK_PARAMS(cols, rows_per_thread);
+				gp.p.halfblock.color_mode = hb_color_mode;
+			}
+			tio_gfx_init_shared(
+			    ctx->gfx_ctx + (i - 1) * buffer_count,
+			    buffer_count, gp);
 		}
 
 		for (int b = 0; b < buffer_count; b++) {
@@ -133,12 +148,12 @@ static inline void trender_generate_frame(trender_ctx_t* ctx, mesh_t* mesh,
 		}
 		render_mesh(mesh, &ctx->render_ctx[thread_id - 1]);
 
-		tio_gfx_sixel_ctx* sc = sixel_ctx_at(ctx, ctx->back[thread_id - 1], thread_id - 1);
+		tio_gfx_ctx* sc = gfx_ctx_at(ctx, ctx->back[thread_id - 1], thread_id - 1);
 		int parts = TIO_GFX_PAYLOAD;
 		if (thread_id == 1)                     parts |= TIO_GFX_HEADER;
 		if (thread_id == ctx->num_render_ctx)   parts |= TIO_GFX_FOOTER;
 
-		tio_gfx_sixel_generate(sc,
+		tio_gfx_generate(sc,
 		    ctx->render_ctx[thread_id - 1].output_buffer.data,
 		    TIO_GFX_FMT_RGB565, parts);
 
@@ -160,17 +175,17 @@ static inline void trender_display_frame(trender_ctx_t* ctx, tio_ctx_t* tio) {
 	ctx->display_time = 0.0;
 
 	if (nt == 1) {
-		tio_gfx_sixel_generate(sixel_ctx_at(ctx, ctx->back[0], 0),
+		tio_gfx_generate(gfx_ctx_at(ctx, ctx->back[0], 0),
 		    ctx->render_ctx[0].output_buffer.data,
 		    TIO_GFX_FMT_RGB565, TIO_GFX_FULL);
 		timer_start(&ctx->timer);
-		tio_write(tio, sixel_ctx_at(ctx, ctx->front[0], 0)->data,
-		               sixel_ctx_at(ctx, ctx->front[0], 0)->data_size);
+		tio_gfx_ctx* fc = gfx_ctx_at(ctx, ctx->front[0], 0);
+		tio_write(tio, tio_gfx_data(fc), tio_gfx_data_size(fc));
 		ctx->display_time += timer_elapsed_ms(&ctx->timer);
 	} else if (nt == 2) {
 		timer_start(&ctx->timer);
-		tio_write(tio, sixel_ctx_at(ctx, ctx->front[0], 0)->data,
-		               sixel_ctx_at(ctx, ctx->front[0], 0)->data_size);
+		tio_gfx_ctx* fc = gfx_ctx_at(ctx, ctx->front[0], 0);
+		tio_write(tio, tio_gfx_data(fc), tio_gfx_data_size(fc));
 		ctx->display_time += timer_elapsed_ms(&ctx->timer);
 		int old_front = ctx->front[0];
 		ctx->front[0] = (old_front + 1) % bc;
@@ -182,8 +197,8 @@ static inline void trender_display_frame(trender_ctx_t* ctx, tio_ctx_t* tio) {
 		 * strip last has PAYLOAD|FOOTER. Write them in order. */
 		for (int i = 0; i < ctx->num_render_ctx; i++) {
 			timer_start(&ctx->timer);
-			tio_write(tio, sixel_ctx_at(ctx, ctx->front[i], i)->data,
-			               sixel_ctx_at(ctx, ctx->front[i], i)->data_size);
+			tio_gfx_ctx* fc = gfx_ctx_at(ctx, ctx->front[i], i);
+			tio_write(tio, tio_gfx_data(fc), tio_gfx_data_size(fc));
 			ctx->display_time += timer_elapsed_ms(&ctx->timer);
 			int old_front = ctx->front[i];
 			ctx->front[i] = (old_front + 1) % bc;
@@ -198,7 +213,7 @@ static inline void trender_print_stats(trender_ctx_t* ctx, double whole_time) {
 	double total_clear_time            = ctx->render_ctx[0].total_clear_time;
 	double total_rasterisation_time    = ctx->render_ctx[0].total_rasterisation_time;
 	double total_texture_sampling_time = ctx->render_ctx[0].total_texture_sampling_time;
-	double total_generate_ms           = sixel_ctx_at(ctx, 0, 0)->total_generate_ms;
+	double total_generate_ms           = tio_gfx_total_ms(gfx_ctx_at(ctx, 0, 0));
 	for (int i = 1; i < ctx->num_render_ctx; i++) {
 		total_clear_time            += ctx->render_ctx[i].total_clear_time;
 		total_rasterisation_time    += ctx->render_ctx[i].total_rasterisation_time;
@@ -207,7 +222,7 @@ static inline void trender_print_stats(trender_ctx_t* ctx, double whole_time) {
 	for (int b = 0; b < ctx->buffer_count; b++) {
 		for (int i = 0; i < ctx->num_render_ctx; i++) {
 			if (b == 0 && i == 0) continue;
-			total_generate_ms += sixel_ctx_at(ctx, b, i)->total_generate_ms;
+			total_generate_ms += tio_gfx_total_ms(gfx_ctx_at(ctx, b, i));
 		}
 	}
 	double total_frame_gen_time =

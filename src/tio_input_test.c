@@ -44,7 +44,7 @@ void cleanup(void) {
 //    fflush(stdout);
 //}
 
-int main() {
+int main(void) {
 	printf("Initializing tio...\r\n");
     tio_init(&ctx);
     atexit(cleanup);

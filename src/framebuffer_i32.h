@@ -17,7 +17,9 @@ framebuffer_i32 create_framebuffer_i32(int width, int height) {
     fb.width = width;
     fb.height = height;
 #if defined(__linux__) || defined(__APPLE__)
-    fb.data = (int32_t*)aligned_alloc(32, width * height * sizeof(int32_t)); // 32-byte aligned for AVX
+    size_t sz_i32 = (size_t)width * height * sizeof(int32_t);
+    sz_i32 += sz_i32 % 32 ? 32 - sz_i32 % 32 : 0;
+    fb.data = (int32_t*)aligned_alloc(32, sz_i32);
 #endif
 #if defined(_WIN32)
      fb.data = (int32_t *)malloc(width * height * sizeof(int32_t));

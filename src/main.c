@@ -125,25 +125,33 @@ void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float
 
 typedef struct {
 	char obj_path[512];
-	char testmodel[64];  /* name of a built-in test model, e.g. "bmw" */
-	int  width;          /* output pixel width  (0 = default 960)     */
-	int  height;         /* output pixel height (0 = default 540)     */
-	int  frames;         /* frames to render    (0 = auto)            */
-	int  interactive;    /* enable camera controls + HUD              */
-	int  rotate;         /* auto-rotate model each frame              */
-	int  verbose;        /* print diagnostic / timing output          */
-	int  center;         /* translate model so bounding box is at origin */
-	int  autofit;        /* center + scale model and set camera dist  */
-	int  threads;        /* number of OMP threads (default 2)         */
-	int  buffers;        /* triple-buffer count   (default 3)         */
+	char testmodel[64];      /* name of a built-in test model, e.g. "bmw" */
+	int  width;              /* output pixel width  (0 = auto)            */
+	int  height;             /* output pixel height (0 = auto)            */
+	int  frames;             /* frames to render    (0 = auto)            */
+	int  interactive;        /* enable camera controls + HUD              */
+	int  rotate;             /* auto-rotate model each frame              */
+	int  verbose;            /* print diagnostic / timing output          */
+	int  center;             /* translate model so bounding box is at origin */
+	int  autofit;            /* center + scale model and set camera dist  */
+	int  threads;            /* number of OMP threads (default 2)         */
+	int  buffers;            /* triple-buffer count   (default 3)         */
+	tio_gfx_backend display_mode;             /* sixel or halfblock (required)      */
+	tio_gfx_halfblock_color_mode hb_color_mode; /* 216 or 24bpp; ignored for sixel */
+	int  display_mode_set;             /* 0 if --display was not provided    */
 } cli_args_t;
 
 static void print_usage(const char* prog) {
-	fprintf(stderr, "Usage: %s [options] model.obj\r\n", prog);
-	fprintf(stderr, "       %s [options] --testmodel=<name>\r\n", prog);
+	fprintf(stderr, "Usage: %s -d sixel|halfblock[216|24bpp] [options] model.obj\r\n", prog);
+	fprintf(stderr, "       %s -d sixel|halfblock[216|24bpp] [options] --testmodel=<name>\r\n", prog);
 	fprintf(stderr, "Options:\r\n");
-	fprintf(stderr, "  -W, --width N         Output width in pixels  (default: 960)\r\n");
-	fprintf(stderr, "  -H, --height N        Output height in pixels (default: 540)\r\n");
+	fprintf(stderr, "  -d, --display MODE    Display mode (required):\r\n");
+	fprintf(stderr, "                          sixel          — sixel graphics\r\n");
+	fprintf(stderr, "                          halfblock      — halfblock, 216-color (default)\r\n");
+	fprintf(stderr, "                          halfblock216   — halfblock, 216-color\r\n");
+	fprintf(stderr, "                          halfblock24bpp — halfblock, 24-bit true color\r\n");
+	fprintf(stderr, "  -W, --width N         Output width in pixels  (default: auto from terminal)\r\n");
+	fprintf(stderr, "  -H, --height N        Output height in pixels (default: auto from terminal)\r\n");
 	fprintf(stderr, "  -n, --frames N        Number of frames to render (default: 1)\r\n");
 	fprintf(stderr, "  -i, --interactive     Interactive mode with camera controls\r\n");
 	fprintf(stderr, "  -r, --rotate          Auto-rotate the model\r\n");
@@ -157,22 +165,40 @@ static void print_usage(const char* prog) {
 }
 
 static int parse_args(int argc, char* argv[], cli_args_t* args) {
-	args->obj_path[0]  = '\0';
-	args->testmodel[0] = '\0';
-	args->width        = 0;
-	args->height       = 0;
-	args->frames       = 0;
-	args->interactive  = 0;
-	args->rotate       = 0;
-	args->verbose      = 0;
-	args->center       = 0;
-	args->autofit      = 0;
-	args->threads      = 2;
-	args->buffers      = 3;
+	args->obj_path[0]      = '\0';
+	args->testmodel[0]     = '\0';
+	args->width            = 0;
+	args->height           = 0;
+	args->frames           = 0;
+	args->interactive      = 0;
+	args->rotate           = 0;
+	args->verbose          = 0;
+	args->center           = 0;
+	args->autofit          = 0;
+	args->threads          = 2;
+	args->buffers          = 3;
+	args->display_mode     = TIO_GFX_BACKEND_SIXEL;
+	args->hb_color_mode    = TIO_GFX_HALFBLOCK_COLOR_216;
+	args->display_mode_set = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
 			return -1;
+		} else if ((strcmp(argv[i], "--display") == 0 || strcmp(argv[i], "-d") == 0) && i + 1 < argc) {
+			i++;
+			if (strcmp(argv[i], "sixel") == 0) {
+				args->display_mode = TIO_GFX_BACKEND_SIXEL;
+			} else if (strcmp(argv[i], "halfblock") == 0 || strcmp(argv[i], "halfblock216") == 0) {
+				args->display_mode  = TIO_GFX_BACKEND_HALFBLOCK;
+				args->hb_color_mode = TIO_GFX_HALFBLOCK_COLOR_216;
+			} else if (strcmp(argv[i], "halfblock24bpp") == 0) {
+				args->display_mode  = TIO_GFX_BACKEND_HALFBLOCK;
+				args->hb_color_mode = TIO_GFX_HALFBLOCK_COLOR_24BIT;
+			} else {
+				fprintf(stderr, "trender: unknown display mode '%s' (use 'sixel', 'halfblock', 'halfblock216', or 'halfblock24bpp')\r\n", argv[i]);
+				return -1;
+			}
+			args->display_mode_set = 1;
 		} else if ((strcmp(argv[i], "--width") == 0 || strcmp(argv[i], "-W") == 0) && i + 1 < argc) {
 			args->width = atoi(argv[++i]);
 		} else if ((strcmp(argv[i], "--height") == 0 || strcmp(argv[i], "-H") == 0) && i + 1 < argc) {
@@ -203,6 +229,11 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 			fprintf(stderr, "trender: unknown option '%s'\r\n", argv[i]);
 			return -1;
 		}
+	}
+
+	if (!args->display_mode_set) {
+		fprintf(stderr, "trender: --display is required\r\n");
+		return -1;
 	}
 
 	if (args->testmodel[0] != '\0' && args->obj_path[0] == '\0') {
@@ -275,19 +306,47 @@ int main(int argc, char* argv[]) {
 		}
 	}
 	
-	int rows = 0, cols = 0;
-	if (tio_get_window_size(&tio_ctx, &rows, &cols) == -1) {
+	tio_init(&tio_ctx);
+	atexit(cleanup);
+	
+	int term_rows = 0, term_cols = 0;
+	if (tio_get_window_size(&tio_ctx, &term_rows, &term_cols) == -1) {
 		fprintf(stderr, "Unable to get window size\r\n");
 		return 1;
 	}
-	if (args.verbose) {
-		printf("Window size: %d rows, %d cols\r\n", rows, cols);
+	if (args.verbose)
+		printf("Terminal size: %d rows, %d cols\r\n", term_rows, term_cols);
+
+	int rows, cols;
+	if (args.display_mode == TIO_GFX_BACKEND_SIXEL) {
+		int pixel_w = 0, pixel_h = 0;
+		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
+		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
+			pixel_w = 960;
+			pixel_h = 540;
+			if (args.verbose)
+				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
+		} else {
+			if (pixel_w > 960) pixel_w = 960;
+			if (pixel_h > 540) pixel_h = 540;
+			if (args.verbose)
+				printf("Pixel size: %dx%d%s (clamped to 960x540)\r\n",
+				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
+		}
+		cols = (args.width  > 0) ? args.width  : pixel_w;
+		rows = (args.height > 0) ? args.height : pixel_h;
+		rows -= rows % 6;
+		cols -= cols % 8;
+	} else {
+		cols = (args.width  > 0) ? args.width  : term_cols;
+		rows = (args.height > 0) ? args.height : term_rows * 2;
+		cols -= cols % 8;
+		rows -= rows % 2;
 	}
-	rows = (args.height > 0) ? args.height : 540;
-	cols = (args.width  > 0) ? args.width  : 960;
-	rows -= rows % 6;
-	cols -= cols % 8;
 	
+	if (args.verbose)
+		printf("Output size: %d rows, %d cols\r\n", rows, cols);
+
 	mat4 model_matrix, view_matrix, projection_matrix;
 	render_params_t render_params;
 	glm_mat4_identity(projection_matrix);
@@ -298,9 +357,6 @@ int main(int argc, char* argv[]) {
 	update_view_matrix(view_matrix);
 	update_matrices(model_matrix, view_matrix, projection_matrix, &render_params);
 
-	tio_init(&tio_ctx);
-	atexit(cleanup);
-
 	if (args.interactive) {
 		printf("\x1b[2J");   // Clear screen
 		printf("\x1b[H");    // Move cursor to home
@@ -309,7 +365,7 @@ int main(int argc, char* argv[]) {
 	fflush(stdout);
 	
 	trender_ctx_t ctx;
-	if (trender_ctx_init(&ctx, rows, cols, args.threads, args.buffers) != 0)
+	if (trender_ctx_init(&ctx, rows, cols, args.threads, args.buffers, args.display_mode, args.hb_color_mode) != 0)
 		return 1;
 	
 	monotonic_timer_t timer_whole;
@@ -476,7 +532,9 @@ int main(int argc, char* argv[]) {
 
 	if (!args.interactive) {
 		/* Move cursor below the rendered image so the shell prompt appears cleanly */
-		printf("\x1b[%d;1H\r\n", rows / 6 + 2);
+		int cursor_row = (args.display_mode == TIO_GFX_BACKEND_SIXEL)
+		    ? rows / 6 + 2 : rows / 2 + 2;
+		printf("\x1b[%d;1H\r\n", cursor_row);
 	}
 	printf("\x1b[?25h"); // Show cursor
 	fflush(stdout);

@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include "timer.h"
 
-int main() {
+int main(void) {
 	monotonic_timer_t timer;
 	timer_start(&timer);
 	for (int i = 0;i < 1000;i++) {

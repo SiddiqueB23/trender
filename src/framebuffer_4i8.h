@@ -15,7 +15,9 @@ framebuffer_4i8 create_framebuffer_4i8(int width, int height) {
     fb.width = width;
     fb.height = height;
 #if defined(__linux__) || defined(__APPLE__)
-   fb.data = (unsigned char*)aligned_alloc(32, width * height * 4); // 32-byte aligned for AVX
+   size_t sz_4i8 = (size_t)width * height * 4;
+   sz_4i8 += sz_4i8 % 32 ? 32 - sz_4i8 % 32 : 0;
+   fb.data = (unsigned char*)aligned_alloc(32, sz_4i8);
 #endif
 #if defined(_WIN32)
     fb.data = (unsigned char*)malloc(width * height * 4);

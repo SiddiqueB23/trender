@@ -21,6 +21,7 @@
 
 #if TIO_LINUX_IMPLEMENTATION
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <termios.h>
 #endif
 
@@ -135,6 +136,47 @@ int tio_get_window_size(tio_ctx_t* ctx, int* rows, int* cols) {
 
 failed:
 	return -1;
+}
+
+/* Returns 0 on success (exact pixel dimensions via TIOCGWINSZ or \x1b[14t query).
+ * Returns -1 if the terminal does not report pixel size. */
+int tio_get_window_size_pixels(tio_ctx_t* ctx, int* pixel_w, int* pixel_h) {
+	struct winsize ws;
+	if (ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0) {
+		*pixel_w = ws.ws_xpixel;
+		*pixel_h = ws.ws_ypixel;
+		return 0;
+	}
+
+	/* Query terminal for pixel size: \x1b[14t → response \x1b[4;<h>;<w>t */
+	if (write(ctx->ofd, "\x1b[14t", 5) != 5)
+		return -1;
+
+	char buf[32];
+	unsigned int i = 0;
+	while (i < sizeof(buf) - 1) {
+		fd_set rfds;
+		struct timeval tv = { 0, 200000 }; /* 200 ms per char */
+		FD_ZERO(&rfds);
+		FD_SET(ctx->ifd, &rfds);
+		if (select(ctx->ifd + 1, &rfds, NULL, NULL, &tv) <= 0)
+			break;
+		if (read(ctx->ifd, buf + i, 1) != 1)
+			break;
+		if (buf[i] == 't')
+			break;
+		i++;
+	}
+	buf[i] = '\0';
+
+	if (buf[0] != '\x1b' || buf[1] != '[')
+		return -1;
+	int h, w;
+	if (sscanf(buf + 2, "4;%d;%d", &h, &w) != 2 || w <= 0 || h <= 0)
+		return -1;
+	*pixel_w = w;
+	*pixel_h = h;
+	return 0;
 }
 
 void enable_mouse_reporting(void) {
@@ -321,6 +363,56 @@ int tio_get_window_size(tio_ctx_t* ctx, int* rows, int* cols) {
 	*cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 	*rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
 	return 0;
+}
+
+/* Returns 0 on success with exact pixel dimensions.
+ * Returns 1 if pixel_w was estimated from cell height (width unavailable).
+ * Returns -1 on failure. */
+int tio_get_window_size_pixels(tio_ctx_t* ctx, int* pixel_w, int* pixel_h) {
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	if (!GetConsoleScreenBufferInfo(ctx->output_handle, &csbi))
+		return -1;
+	int cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+	int rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+	if (cols <= 0 || rows <= 0)
+		return -1;
+
+	int cell_w = 0, cell_h = 0;
+
+	/* GetCurrentConsoleFontEx — works in conhost and Windows Terminal */
+	CONSOLE_FONT_INFOEX cfi;
+	cfi.cbSize = sizeof(cfi);
+	if (GetCurrentConsoleFontEx(ctx->output_handle, FALSE, &cfi)) {
+		cell_w = (int)cfi.dwFontSize.X;
+		cell_h = (int)cfi.dwFontSize.Y;
+	}
+
+	/* dwFontSize.X is sometimes 0 (raster fonts, some ConPTY configs).
+	 * Try GetConsoleWindow + GetClientRect to derive cell size from the
+	 * actual window pixel dimensions. Works in conhost; NULL in Windows Terminal. */
+	if (cell_w == 0) {
+		HWND hwnd = GetConsoleWindow();
+		RECT rect;
+		if (hwnd && GetClientRect(hwnd, &rect) && rect.right > 0 && rect.bottom > 0) {
+			cell_w = (int)rect.right  / cols;
+			cell_h = (int)rect.bottom / rows;
+		}
+	}
+
+	if (cell_h == 0)
+		return -1;
+
+	/* Last resort: estimate width as half the cell height.
+	 * Typical console fonts (Cascadia Code, Consolas) are close to 1:2 ratio. */
+	int estimated = 0;
+	if (cell_w == 0) {
+		cell_w = cell_h / 2;
+		estimated = 1;
+	}
+
+	*pixel_w = cols * cell_w;
+	*pixel_h = rows * cell_h;
+	return estimated;
 }
 
 #endif

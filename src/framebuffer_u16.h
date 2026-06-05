@@ -17,7 +17,9 @@ framebuffer_u16 create_framebuffer_u16(int width, int height) {
 	fb.width = width;
 	fb.height = height;
 #if defined(__linux__) || defined(__APPLE__)
-	fb.data = (uint16_t*)aligned_alloc(32, width * height * sizeof(uint16_t)); // 32-byte aligned for AVX
+	size_t sz_u16 = (size_t)width * height * sizeof(uint16_t);
+	sz_u16 += sz_u16 % 32 ? 32 - sz_u16 % 32 : 0;
+	fb.data = (uint16_t*)aligned_alloc(32, sz_u16);
 #endif
 #if defined(_WIN32)
 	fb.data = (uint16_t*)malloc(width * height * sizeof(uint16_t));
