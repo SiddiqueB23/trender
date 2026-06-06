@@ -42,11 +42,13 @@ typedef enum {
 typedef struct {
     int width, height;
     tio_gfx_halfblock_color_mode color_mode;
+    int dither_offset_x, dither_offset_y; /* pixel offsets into Bayer matrix; for multithreaded strips */
 } tio_gfx_halfblock_params;
 
 #define TIO_GFX_HALFBLOCK_DEFAULT_PARAMS(w, h) \
     ((tio_gfx_halfblock_params){ .width=(w), .height=(h), \
-                                  .color_mode=TIO_GFX_HALFBLOCK_COLOR_24BIT })
+                                  .color_mode=TIO_GFX_HALFBLOCK_COLOR_24BIT, \
+                                  .dither_offset_x=0, .dither_offset_y=0 })
 
 typedef struct {
     /* public — read after generate */
@@ -327,6 +329,8 @@ static char* tio_gfx__hb_payload_216(tio_gfx_halfblock_ctx* ctx,
     const int w        = ctx->_params.width;
     const int h        = ctx->_params.height;
     const int last_row = ((h + 1) / 2 - 1) * 2;
+    const int oy       = ctx->_params.dither_offset_y;
+    const int ox       = ctx->_params.dither_offset_x;
 
     for (int row = 0; row < h; row += 2) {
         int has_bot = (row + 1 < h);
@@ -339,8 +343,8 @@ static char* tio_gfx__hb_payload_216(tio_gfx_halfblock_ctx* ctx,
                 tio_gfx__hb_read_pixel(pixels, fmt, row+1, x, w, &br, &bg, &bb);
             else { br = fr; bg = fg; bb = fb; }
 
-            unsigned char tbayer = BAYER_PATTERN_16X16[row       % 16][x % 16];
-            unsigned char bbayer = BAYER_PATTERN_16X16[(row + 1) % 16][x % 16];
+            unsigned char tbayer = BAYER_PATTERN_16X16[(row       + oy) % 16][(x + ox) % 16];
+            unsigned char bbayer = BAYER_PATTERN_16X16[(row + 1   + oy) % 16][(x + ox) % 16];
 
             int fgi = 16 + 36 * tio_gfx__hb_quantize_xterm(fr, tbayer)
                          +  6 * tio_gfx__hb_quantize_xterm(fg, tbayer)

@@ -51,7 +51,11 @@ static inline void unset_lock_with_debug(omp_lock_t* lock, int thread_id, int bu
 
 static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	int num_threads, int buffer_count, tio_gfx_backend display_mode,
-	tio_gfx_halfblock_color_mode hb_color_mode) {
+	tio_gfx_halfblock_color_mode hb_color_mode, int cell_height_px,
+	tio_gfx_iterm_encode_fmt iterm_encode_fmt,
+	int iterm_jpeg_quality, int iterm_png_compression_level,
+	int iterm_encode_scale,
+	int sixel_scale_x, int sixel_scale_y) {
 	if (num_threads == 1) {
 		buffer_count = 1;
 	} else if (buffer_count < 3) {
@@ -67,8 +71,12 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	ctx->display_time     = 0.0;
 	ctx->total_display_time = 0.0;
 
-	/* Strip boundary alignment: sixel bands are 6 rows tall; halfblock cells are 2 rows tall. */
-	int strip_align = (display_mode == TIO_GFX_BACKEND_SIXEL) ? 6 : 2;
+	/* Strip boundary alignment per backend. */
+	int strip_align;
+	if (display_mode == TIO_GFX_BACKEND_SIXEL)      strip_align = 6;
+	else if (display_mode == TIO_GFX_BACKEND_ITERM) strip_align = (cell_height_px > 0 ? cell_height_px : 1)
+	                                                              * (iterm_encode_scale > 1 ? iterm_encode_scale : 1);
+	else                                             strip_align = 2;
 
 	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_render_ctx * sizeof(rendering_ctx_t));
 
@@ -85,6 +93,14 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		tio_gfx_params gp;
 		if (display_mode == TIO_GFX_BACKEND_SIXEL) {
 			gp = TIO_GFX_SIXEL_PARAMS(cols, rows);
+			gp.p.sixel.scale_x = sixel_scale_x;
+			gp.p.sixel.scale_y = sixel_scale_y;
+		} else if (display_mode == TIO_GFX_BACKEND_ITERM) {
+			gp = TIO_GFX_ITERM_PARAMS(cols, rows);
+			gp.p.iterm.encode_fmt            = iterm_encode_fmt;
+			gp.p.iterm.jpeg_quality          = iterm_jpeg_quality;
+			gp.p.iterm.png_compression_level = iterm_png_compression_level;
+			gp.p.iterm.encode_scale          = iterm_encode_scale;
 		} else {
 			gp = TIO_GFX_HALFBLOCK_PARAMS(cols, rows);
 			gp.p.halfblock.color_mode = hb_color_mode;
@@ -116,10 +132,21 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 			tio_gfx_params gp;
 			if (display_mode == TIO_GFX_BACKEND_SIXEL) {
 				gp = TIO_GFX_SIXEL_PARAMS(cols, rows_per_thread);
+				gp.p.sixel.scale_x         = sixel_scale_x;
+				gp.p.sixel.scale_y         = sixel_scale_y;
 				gp.p.sixel.dither_offset_y = starty;
+			} else if (display_mode == TIO_GFX_BACKEND_ITERM) {
+				gp = TIO_GFX_ITERM_PARAMS(cols, rows_per_thread);
+				gp.p.iterm.encode_fmt            = iterm_encode_fmt;
+				gp.p.iterm.jpeg_quality          = iterm_jpeg_quality;
+				gp.p.iterm.png_compression_level = iterm_png_compression_level;
+				gp.p.iterm.encode_scale          = iterm_encode_scale;
+				gp.p.iterm.starty_rows    = starty / (cell_height_px > 0 ? cell_height_px : 1);
+				gp.p.iterm.cell_height_px = cell_height_px;
 			} else {
 				gp = TIO_GFX_HALFBLOCK_PARAMS(cols, rows_per_thread);
-				gp.p.halfblock.color_mode = hb_color_mode;
+				gp.p.halfblock.color_mode      = hb_color_mode;
+				gp.p.halfblock.dither_offset_y = starty;
 			}
 			tio_gfx_init_shared(
 			    ctx->gfx_ctx + (i - 1) * buffer_count,
@@ -149,9 +176,15 @@ static inline void trender_generate_frame(trender_ctx_t* ctx, mesh_t* mesh,
 		render_mesh(mesh, &ctx->render_ctx[thread_id - 1]);
 
 		tio_gfx_ctx* sc = gfx_ctx_at(ctx, ctx->back[thread_id - 1], thread_id - 1);
-		int parts = TIO_GFX_PAYLOAD;
-		if (thread_id == 1)                     parts |= TIO_GFX_HEADER;
-		if (thread_id == ctx->num_render_ctx)   parts |= TIO_GFX_FOOTER;
+		int parts;
+		if (ctx->display_mode == TIO_GFX_BACKEND_ITERM) {
+			/* Each strip is a self-contained OSC sequence — must have all three parts. */
+			parts = TIO_GFX_FULL;
+		} else {
+			parts = TIO_GFX_PAYLOAD;
+			if (thread_id == 1)                   parts |= TIO_GFX_HEADER;
+			if (thread_id == ctx->num_render_ctx) parts |= TIO_GFX_FOOTER;
+		}
 
 		tio_gfx_generate(sc,
 		    ctx->render_ctx[thread_id - 1].output_buffer.data,
