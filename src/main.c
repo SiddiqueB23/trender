@@ -141,10 +141,10 @@ typedef struct {
 	tio_gfx_iterm_encode_fmt iterm_encode_fmt;  /* BMP, PNG, or JPEG; ignored for non-iterm */
 	int  iterm_jpeg_quality;                    /* 1–100; itermjpeg only                    */
 	int  iterm_png_compression;                 /* 0–9; iterm/itermpng only                 */
-	int  iterm_encode_scale;                    /* spatial downsample (1=full, 2=half, …)   */
-	int  sixel_scale_x;                         /* sixel upscale X (1=normal, 2=2× wide)    */
-	int  sixel_scale_y;                         /* sixel upscale Y (1=normal, 2=2× tall)    */
-	int  cell_height_px;                        /* terminal cell height in px; iterm only   */
+	int  upscale_x;                             /* display upscale X (1=normal, 2=2× wide)  */
+	int  upscale_y;                             /* display upscale Y (1=normal, 2=2× tall)  */
+	int  cell_height_px;                        /* terminal cell height in px               */
+	int  cell_width_px;                         /* terminal cell width in px                */
 	int  display_mode_set;                      /* 0 if --display was not provided          */
 } cli_args_t;
 
@@ -161,6 +161,7 @@ static void print_usage(const char* prog) {
 	fprintf(stderr, "                          itermpng       — iTerm2 inline image, PNG\r\n");
 	fprintf(stderr, "                          itermbmp       — iTerm2 inline image, BMP\r\n");
 	fprintf(stderr, "                          itermjpeg      — iTerm2 inline image, JPEG\r\n");
+	fprintf(stderr, "                          kitty          — Kitty graphics protocol, RGB\r\n");
 	fprintf(stderr, "  -W, --width N         Output width in pixels  (default: auto from terminal)\r\n");
 	fprintf(stderr, "  -H, --height N        Output height in pixels (default: auto from terminal)\r\n");
 	fprintf(stderr, "  -n, --frames N        Number of frames to render (default: 1)\r\n");
@@ -173,9 +174,10 @@ static void print_usage(const char* prog) {
 	fprintf(stderr, "  -B, --buffers N       Buffer count      (default: 3)\r\n");
 	fprintf(stderr, "      --jpeg-quality N  JPEG quality 1–100 (default: 90; higher=better quality/larger; itermjpeg only)\r\n");
 	fprintf(stderr, "      --png-compression N  PNG compression 0–9 (default: 8; higher=smaller file/slower; iterm/itermpng only)\r\n");
-	fprintf(stderr, "      --iterm-scale N   Encode at 1/N resolution, display at full size (default: 1; iterm only)\r\n");
-	fprintf(stderr, "      --sixel-scale-x N  Upscale sixel output N× horizontally (default: 1; sixel only)\r\n");
-	fprintf(stderr, "      --sixel-scale-y N  Upscale sixel output N× vertically   (default: 1; sixel only)\r\n");
+	fprintf(stderr, "  --display-upscale-x N, -dux N\r\n");
+	fprintf(stderr, "                        Upscale display N× horizontally (default: 1; all pixel backends)\r\n");
+	fprintf(stderr, "  --display-upscale-y N, -duy N\r\n");
+	fprintf(stderr, "                        Upscale display N× vertically   (default: 1; all pixel backends)\r\n");
 	fprintf(stderr, "      --testmodel=NAME  Use a built-in test model (e.g. bmw)\r\n");
 	fprintf(stderr, "  -h, --help            Show this help\r\n");
 }
@@ -198,10 +200,10 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 	args->iterm_encode_fmt    = TIO_GFX_ITERM_FMT_PNG;
 	args->iterm_jpeg_quality    = 90;
 	args->iterm_png_compression = 8;
-	args->iterm_encode_scale    = 1;
-	args->sixel_scale_x         = 1;
-	args->sixel_scale_y         = 1;
+	args->upscale_x             = 1;
+	args->upscale_y             = 1;
 	args->cell_height_px        = 1;
+	args->cell_width_px         = 1;
 	args->display_mode_set = 0;
 
 	for (int i = 1; i < argc; i++) {
@@ -226,8 +228,10 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 			} else if (strcmp(argv[i], "itermjpeg") == 0) {
 				args->display_mode     = TIO_GFX_BACKEND_ITERM;
 				args->iterm_encode_fmt = TIO_GFX_ITERM_FMT_JPEG;
+			} else if (strcmp(argv[i], "kitty") == 0) {
+				args->display_mode = TIO_GFX_BACKEND_KITTY;
 			} else {
-				fprintf(stderr, "trender: unknown display mode '%s' (use 'sixel', 'halfblock', 'halfblock216', 'halfblock24bpp', 'iterm', 'itermpng', 'itermbmp', or 'itermjpeg')\r\n", argv[i]);
+				fprintf(stderr, "trender: unknown display mode '%s' (use 'sixel', 'halfblock', 'halfblock216', 'halfblock24bpp', 'iterm', 'itermpng', 'itermbmp', 'itermjpeg', or 'kitty')\r\n", argv[i]);
 				return -1;
 			}
 			args->display_mode_set = 1;
@@ -255,12 +259,12 @@ static int parse_args(int argc, char* argv[], cli_args_t* args) {
 			args->iterm_jpeg_quality = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--png-compression") == 0 && i + 1 < argc) {
 			args->iterm_png_compression = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "--iterm-scale") == 0 && i + 1 < argc) {
-			args->iterm_encode_scale = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "--sixel-scale-x") == 0 && i + 1 < argc) {
-			args->sixel_scale_x = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "--sixel-scale-y") == 0 && i + 1 < argc) {
-			args->sixel_scale_y = atoi(argv[++i]);
+		} else if ((strcmp(argv[i], "--display-upscale-x") == 0 || strcmp(argv[i], "-dux") == 0) && i + 1 < argc) {
+			args->upscale_x = atoi(argv[++i]);
+			if (args->upscale_x < 1) args->upscale_x = 1;
+		} else if ((strcmp(argv[i], "--display-upscale-y") == 0 || strcmp(argv[i], "-duy") == 0) && i + 1 < argc) {
+			args->upscale_y = atoi(argv[++i]);
+			if (args->upscale_y < 1) args->upscale_y = 1;
 		} else if (strncmp(argv[i], "--testmodel=", 12) == 0) {
 			strncpy(args->testmodel, argv[i] + 12, sizeof(args->testmodel) - 1);
 			args->testmodel[sizeof(args->testmodel) - 1] = '\0';
@@ -320,9 +324,9 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 	
-	if (args.verbose) {
-		print_material_info(mesh.materials, mesh.num_materials);
-	}
+	// if (args.verbose) {
+	// 	print_material_info(mesh.materials, mesh.num_materials);
+	// }
 	
 	if (args.center || args.autofit) {
 		float minx, miny, minz, maxx, maxy, maxz;
@@ -377,11 +381,10 @@ int main(int argc, char* argv[]) {
 		rows = (args.height > 0) ? args.height : pixel_h;
 		/* Align to multiples of (8*scale_x) and (6*scale_y) so that after
 		 * dividing by scale the render dimensions are still aligned to 8 and 6. */
-		cols -= cols % (8 * args.sixel_scale_x);
-		rows -= rows % (6 * args.sixel_scale_y);
-		/* Divide down to render resolution; the sixel encoder upscales back. */
-		cols /= args.sixel_scale_x;
-		rows /= args.sixel_scale_y;
+		cols -= cols % (8 * args.upscale_x);
+		rows -= rows % (6 * args.upscale_y);
+		cols /= args.upscale_x;
+		rows /= args.upscale_y;
 	} else if (args.display_mode == TIO_GFX_BACKEND_ITERM) {
 		int pixel_w = 0, pixel_h = 0;
 		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
@@ -399,15 +402,43 @@ int main(int argc, char* argv[]) {
 		rows = (args.height > 0) ? args.height : pixel_h;
 		args.cell_height_px = (term_rows > 0 && pixel_h > 0) ? pixel_h / term_rows : 1;
 		if (args.cell_height_px < 1) args.cell_height_px = 1;
-		int col_align = 8 * (args.iterm_encode_scale > 1 ? args.iterm_encode_scale : 1);
-		int row_align = args.cell_height_px * (args.iterm_encode_scale > 1 ? args.iterm_encode_scale : 1);
-		cols -= cols % col_align;
-		rows -= rows % row_align;
-	} else {
+		cols -= cols % (8 * args.upscale_x);
+		rows -= rows % (args.cell_height_px * args.upscale_y);
+		cols /= args.upscale_x;
+		rows /= args.upscale_y;
+	} else if (args.display_mode == TIO_GFX_BACKEND_KITTY) {
+		int pixel_w = 0, pixel_h = 0;
+		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
+		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
+			pixel_w = 960;
+			pixel_h = 540;
+			if (args.verbose)
+				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
+		} else {
+			if (args.verbose)
+				printf("Pixel size: %dx%d%s\r\n",
+				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
+		}
+		cols = (args.width  > 0) ? args.width  : pixel_w;
+		rows = (args.height > 0) ? args.height : pixel_h;
+		args.cell_height_px = (term_rows > 0 && pixel_h > 0) ? pixel_h / term_rows : 1;
+		args.cell_width_px  = (term_cols > 0 && pixel_w > 0) ? pixel_w / term_cols : 1;
+		if (args.cell_height_px < 1) args.cell_height_px = 1;
+		if (args.cell_width_px  < 1) args.cell_width_px  = 1;
+		cols -= cols % (8 * args.upscale_x);
+		rows -= rows % (args.cell_height_px * args.upscale_y);
+		cols /= args.upscale_x;
+		rows /= args.upscale_y;
+	} else if (args.display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
 		cols = (args.width  > 0) ? args.width  : term_cols;
 		rows = (args.height > 0) ? args.height : term_rows * 2;
-		cols -= cols % 8;
-		rows -= rows % 2;
+		cols -= cols % (8 * args.upscale_x);
+		rows -= rows % (2 * args.upscale_y);
+		cols /= args.upscale_x;
+		rows /= args.upscale_y;
+	} else {
+		fprintf(stderr, "trender: unknown display mode %d\r\n", (int)args.display_mode);
+		return 1;
 	}
 	
 	if (args.verbose)
@@ -431,7 +462,7 @@ int main(int argc, char* argv[]) {
 	fflush(stdout);
 	
 	trender_ctx_t ctx;
-	if (trender_ctx_init(&ctx, rows, cols, args.threads, args.buffers, args.display_mode, args.hb_color_mode, args.cell_height_px, args.iterm_encode_fmt, args.iterm_jpeg_quality, args.iterm_png_compression, args.iterm_encode_scale, args.sixel_scale_x, args.sixel_scale_y) != 0)
+	if (trender_ctx_init(&ctx, rows, cols, args.threads, args.buffers, args.display_mode, args.hb_color_mode, args.cell_height_px, args.iterm_encode_fmt, args.iterm_jpeg_quality, args.iterm_png_compression, args.upscale_x, args.upscale_y, args.cell_width_px) != 0)
 		return 1;
 	
 	monotonic_timer_t timer_whole;
@@ -546,9 +577,9 @@ int main(int argc, char* argv[]) {
 					printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
 					printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
 					printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", camera_x, camera_y, camera_z);
-					printf("Processing:    %0.2f    \r\n", processing_time);
-					printf("Display:       %0.2f    \r\n", ctx.display_time);
-					printf("Frame time:    %0.2f    \r\n", frame_time);
+					printf("Processing:    %0.2f                              \r\n", processing_time);
+					printf("Display:       %0.2f                              \r\n", ctx.display_time);
+					printf("Frame time:    %0.2f                              \r\n", frame_time);
 					fflush(stdout);
 				}
 			}
@@ -566,49 +597,45 @@ int main(int argc, char* argv[]) {
 					unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), 0, ctx.front[i], i);
 				}
 			}
-			if (args.verbose) {
-				printf("\r\n");
-				printf("Total times:\r\n");
-				printf("Processing:    %0.2f\r\n", total_processing_time);
-				printf("Display:       %0.2f\r\n", ctx.total_display_time);
-				printf("Frame time:    %0.2f\r\n", total_frame_time);
-				printf("Average times:\r\n");
-				printf("Processing:    %0.2f\r\n", total_processing_time / (float)num_frames);
-				printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)num_frames);
-				printf("Frame time:    %0.2f\r\n", total_frame_time / (float)num_frames);
-			}
 		}
 
 		if (ctx.num_threads >= 2 && thread_id >= 1) {
 			unset_lock_with_debug(buffer_lock_at(&ctx, ctx.back[thread_id - 1], thread_id - 1), thread_id, ctx.back[thread_id - 1], thread_id - 1);
 		}
-		if (args.verbose) {
-			printf("%d exited loop\r\n", thread_id);
-			fflush(stdout);
-		}
 	}
 
+	/* Move cursor below the rendered image so the shell prompt appears cleanly */
+	int cursor_row;
+	if (args.display_mode == TIO_GFX_BACKEND_SIXEL)
+		cursor_row = rows * args.upscale_y / 6 + 2;
+	else if (args.display_mode == TIO_GFX_BACKEND_HALFBLOCK)
+		cursor_row = rows * args.upscale_y / 2 + 2;
+	else if (args.display_mode == TIO_GFX_BACKEND_ITERM)
+		cursor_row = rows * args.upscale_y / args.cell_height_px + 2;
+	else if (args.display_mode == TIO_GFX_BACKEND_KITTY)
+		cursor_row = rows * args.upscale_y / args.cell_height_px + 2;
+	else {
+		fprintf(stderr, "trender: unknown display mode %d\r\n", (int)args.display_mode);
+		return 1;
+	}
+	printf("\x1b[%d;1H\r\n", cursor_row);
+	printf("\x1b[?25h"); // Show cursor
+	fflush(stdout);
+
 	if (args.verbose) {
-		printf("All threads joined\r\n");
+		printf("\r\n");
+		printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
+		printf("Total times:        \r\n");
+		printf("Processing:    %0.2f\r\n", total_processing_time);
+		printf("Display:       %0.2f\r\n", ctx.total_display_time);
+		printf("Frame time:    %0.2f\r\n", total_frame_time);
+		printf("Average times:      \r\n");
+		printf("Processing:    %0.2f\r\n", total_processing_time / (float)args.frames);
+		printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)args.frames);
+		printf("Frame time:    %0.2f\r\n", total_frame_time / (float)args.frames);
 		double whole_time = timer_elapsed_ms(&timer_whole);
 		trender_print_stats(&ctx, whole_time);
 	}
-
-	fflush(stdout);
-
-	if (!args.interactive) {
-		/* Move cursor below the rendered image so the shell prompt appears cleanly */
-		int cursor_row;
-		if (args.display_mode == TIO_GFX_BACKEND_SIXEL)
-			cursor_row = rows * args.sixel_scale_y / 6 + 2;
-		else if (args.display_mode == TIO_GFX_BACKEND_ITERM)
-			cursor_row = rows / args.cell_height_px + 2;
-		else
-			cursor_row = rows / 2 + 2;
-		printf("\x1b[%d;1H\r\n", cursor_row);
-	}
-	printf("\x1b[?25h"); // Show cursor
-	fflush(stdout);
 
 	return 0;
 }

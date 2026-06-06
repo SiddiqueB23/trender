@@ -43,12 +43,14 @@ typedef struct {
     int width, height;
     tio_gfx_halfblock_color_mode color_mode;
     int dither_offset_x, dither_offset_y; /* pixel offsets into Bayer matrix; for multithreaded strips */
+    int upscale_x, upscale_y; /* each render pixel repeated upscale_x cols; each row pair repeated upscale_y rows */
 } tio_gfx_halfblock_params;
 
 #define TIO_GFX_HALFBLOCK_DEFAULT_PARAMS(w, h) \
     ((tio_gfx_halfblock_params){ .width=(w), .height=(h), \
                                   .color_mode=TIO_GFX_HALFBLOCK_COLOR_24BIT, \
-                                  .dither_offset_x=0, .dither_offset_y=0 })
+                                  .dither_offset_x=0, .dither_offset_y=0, \
+                                  .upscale_x=1, .upscale_y=1 })
 
 typedef struct {
     /* public — read after generate */
@@ -213,8 +215,11 @@ static unsigned char tio_gfx__hb_quantize_xterm(unsigned char val,
 }
 
 /* ── Capacity ────────────────────────────────────────────────────────────── */
-static size_t tio_gfx__hb_buf_cap(int w, int h) {
-    return (size_t)((w * 39 + 7) * ((h + 1) / 2)) + 100;
+static size_t tio_gfx__hb_buf_cap(int w, int h, int ux, int uy) {
+    /* 28 = max color escape (combined fg+bg 24-bit), 3*ux = chars per render pixel, 10 = reset+crlf+margin */
+    size_t per_row = (size_t)w * (28 + 3 * (size_t)ux) + 10;
+    size_t n_rows  = (size_t)(h * uy + 1) / 2;
+    return per_row * n_rows + 100;
 }
 
 /* ── Lifecycle ───────────────────────────────────────────────────────────── */
@@ -223,7 +228,7 @@ void tio_gfx_halfblock_init(tio_gfx_halfblock_ctx* ctx,
     ctx->_params           = params;
     ctx->width             = params.width;
     ctx->height            = params.height;
-    ctx->data_cap          = tio_gfx__hb_buf_cap(params.width, params.height);
+    ctx->data_cap          = tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
     ctx->data              = (char*)TIO_GFX_MALLOC(ctx->data_cap);
     ctx->data_size         = 0;
     ctx->total_generate_ms = 0.0;
@@ -239,7 +244,7 @@ void tio_gfx_halfblock_destroy(tio_gfx_halfblock_ctx* ctx) {
 
 void tio_gfx_halfblock_init_shared(tio_gfx_halfblock_ctx* ctxs, int n,
                                     tio_gfx_halfblock_params params) {
-    size_t cap = tio_gfx__hb_buf_cap(params.width, params.height);
+    size_t cap = tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
     for (int i = 0; i < n; i++) {
         ctxs[i]._params           = params;
         ctxs[i].width             = params.width;
@@ -263,7 +268,7 @@ void tio_gfx_halfblock_destroy_shared(tio_gfx_halfblock_ctx* ctxs, int n) {
 
 void tio_gfx_halfblock_set_params(tio_gfx_halfblock_ctx* ctx,
                                    tio_gfx_halfblock_params params) {
-    size_t new_cap = tio_gfx__hb_buf_cap(params.width, params.height);
+    size_t new_cap = tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
     if (new_cap > ctx->data_cap) {
         TIO_GFX_FREE(ctx->data);
         ctx->data_cap  = new_cap;
@@ -281,21 +286,27 @@ static char* tio_gfx__hb_payload_24bit(tio_gfx_halfblock_ctx* ctx,
                                          const void* pixels,
                                          tio_gfx_pixel_fmt fmt,
                                          int emit_last_crlf) {
-    const int w        = ctx->_params.width;
-    const int h        = ctx->_params.height;
-    const int last_row = ((h + 1) / 2 - 1) * 2;
+    const int w  = ctx->_params.width;
+    const int h  = ctx->_params.height;
+    const int ux = ctx->_params.upscale_x > 0 ? ctx->_params.upscale_x : 1;
+    const int uy = ctx->_params.upscale_y > 0 ? ctx->_params.upscale_y : 1;
+    /* terminal row k uses render pixel rows (2k)/uy (top) and (2k+1)/uy (bottom).
+     * this gives each render pixel row uy consecutive terminal half-rows, so
+     * a strip [a,b] at uy=2 becomes [a,a,b,b] not [a,b,a,b]. */
+    const int num_terminal_rows = h * uy / 2;
 
-    for (int row = 0; row < h; row += 2) {
-        int has_bot = (row + 1 < h);
+    for (int k = 0; k < num_terminal_rows; k++) {
+        int top = (2 * k)     / uy;
+        int bot = (2 * k + 1) / uy;
+        if (bot >= h) bot = h - 1;
+
         int pfr = -1, pfg = -1, pfb = -1;
         int pbr = -1, pbg = -1, pbb = -1;
 
         for (int x = 0; x < w; x++) {
             unsigned char fr, fg, fb, br, bg, bb;
-            tio_gfx__hb_read_pixel(pixels, fmt, row,     x, w, &fr, &fg, &fb);
-            if (has_bot)
-                tio_gfx__hb_read_pixel(pixels, fmt, row+1, x, w, &br, &bg, &bb);
-            else { br = fr; bg = fg; bb = fb; }
+            tio_gfx__hb_read_pixel(pixels, fmt, top, x, w, &fr, &fg, &fb);
+            tio_gfx__hb_read_pixel(pixels, fmt, bot, x, w, &br, &bg, &bb);
 
             int fg_same = (fr == (unsigned char)pfr &&
                            fg == (unsigned char)pfg &&
@@ -309,14 +320,16 @@ static char* tio_gfx__hb_payload_24bit(tio_gfx_halfblock_ctx* ctx,
             else if (bg_same) p = tio_gfx__hb_set_fg(p, fr, fg, fb);
             else              p = tio_gfx__hb_set_fg_bg(p, fr, fg, fb, br, bg, bb);
 
-            p[0] = (char)0xE2; p[1] = (char)0x96; p[2] = (char)0x80; p += 3;
+            for (int cx = 0; cx < ux; cx++) {
+                p[0] = (char)0xE2; p[1] = (char)0x96; p[2] = (char)0x80; p += 3;
+            }
             pfr = fr; pfg = fg; pfb = fb;
             pbr = br; pbg = bg; pbb = bb;
         }
 
         p = tio_gfx__hb_reset(p);
-        if (!emit_last_crlf && row == last_row) continue;
-        p[0] = '\r'; p[1] = '\n'; p += 2;
+        int is_last = (!emit_last_crlf && k == num_terminal_rows - 1);
+        if (!is_last) { p[0] = '\r'; p[1] = '\n'; p += 2; }
     }
     return p;
 }
@@ -326,25 +339,28 @@ static char* tio_gfx__hb_payload_216(tio_gfx_halfblock_ctx* ctx,
                                        const void* pixels,
                                        tio_gfx_pixel_fmt fmt,
                                        int emit_last_crlf) {
-    const int w        = ctx->_params.width;
-    const int h        = ctx->_params.height;
-    const int last_row = ((h + 1) / 2 - 1) * 2;
-    const int oy       = ctx->_params.dither_offset_y;
-    const int ox       = ctx->_params.dither_offset_x;
+    const int w  = ctx->_params.width;
+    const int h  = ctx->_params.height;
+    const int ux = ctx->_params.upscale_x > 0 ? ctx->_params.upscale_x : 1;
+    const int uy = ctx->_params.upscale_y > 0 ? ctx->_params.upscale_y : 1;
+    const int oy = ctx->_params.dither_offset_y;
+    const int ox = ctx->_params.dither_offset_x;
+    const int num_terminal_rows = h * uy / 2;
 
-    for (int row = 0; row < h; row += 2) {
-        int has_bot = (row + 1 < h);
+    for (int k = 0; k < num_terminal_rows; k++) {
+        int top = (2 * k)     / uy;
+        int bot = (2 * k + 1) / uy;
+        if (bot >= h) bot = h - 1;
+
         int pfg_idx = -1, pbg_idx = -1;
 
         for (int x = 0; x < w; x++) {
             unsigned char fr, fg, fb, br, bg, bb;
-            tio_gfx__hb_read_pixel(pixels, fmt, row,     x, w, &fr, &fg, &fb);
-            if (has_bot)
-                tio_gfx__hb_read_pixel(pixels, fmt, row+1, x, w, &br, &bg, &bb);
-            else { br = fr; bg = fg; bb = fb; }
+            tio_gfx__hb_read_pixel(pixels, fmt, top, x, w, &fr, &fg, &fb);
+            tio_gfx__hb_read_pixel(pixels, fmt, bot, x, w, &br, &bg, &bb);
 
-            unsigned char tbayer = BAYER_PATTERN_16X16[(row       + oy) % 16][(x + ox) % 16];
-            unsigned char bbayer = BAYER_PATTERN_16X16[(row + 1   + oy) % 16][(x + ox) % 16];
+            unsigned char tbayer = BAYER_PATTERN_16X16[(top + oy) % 16][(x + ox) % 16];
+            unsigned char bbayer = BAYER_PATTERN_16X16[(bot + oy) % 16][(x + ox) % 16];
 
             int fgi = 16 + 36 * tio_gfx__hb_quantize_xterm(fr, tbayer)
                          +  6 * tio_gfx__hb_quantize_xterm(fg, tbayer)
@@ -361,13 +377,15 @@ static char* tio_gfx__hb_payload_216(tio_gfx_halfblock_ctx* ctx,
             else if (bg_same)  p = tio_gfx__hb_set_fg5(p, fgi);
             else               p = tio_gfx__hb_set_fg5_bg5(p, fgi, bgi);
 
-            p[0] = (char)0xE2; p[1] = (char)0x96; p[2] = (char)0x80; p += 3;
+            for (int cx = 0; cx < ux; cx++) {
+                p[0] = (char)0xE2; p[1] = (char)0x96; p[2] = (char)0x80; p += 3;
+            }
             pfg_idx = fgi; pbg_idx = bgi;
         }
 
         p = tio_gfx__hb_reset(p);
-        if (!emit_last_crlf && row == last_row) continue;
-        p[0] = '\r'; p[1] = '\n'; p += 2;
+        int is_last = (!emit_last_crlf && k == num_terminal_rows - 1);
+        if (!is_last) { p[0] = '\r'; p[1] = '\n'; p += 2; }
     }
     return p;
 }

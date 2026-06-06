@@ -54,8 +54,7 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	tio_gfx_halfblock_color_mode hb_color_mode, int cell_height_px,
 	tio_gfx_iterm_encode_fmt iterm_encode_fmt,
 	int iterm_jpeg_quality, int iterm_png_compression_level,
-	int iterm_encode_scale,
-	int sixel_scale_x, int sixel_scale_y) {
+	int upscale_x, int upscale_y, int cell_width_px) {
 	if (num_threads == 1) {
 		buffer_count = 1;
 	} else if (buffer_count < 3) {
@@ -73,10 +72,18 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 
 	/* Strip boundary alignment per backend. */
 	int strip_align;
-	if (display_mode == TIO_GFX_BACKEND_SIXEL)      strip_align = 6;
-	else if (display_mode == TIO_GFX_BACKEND_ITERM) strip_align = (cell_height_px > 0 ? cell_height_px : 1)
-	                                                              * (iterm_encode_scale > 1 ? iterm_encode_scale : 1);
-	else                                             strip_align = 2;
+	if (display_mode == TIO_GFX_BACKEND_SIXEL)
+	    strip_align = 6;
+	else if (display_mode == TIO_GFX_BACKEND_HALFBLOCK)
+	    strip_align = 2;
+	else if (display_mode == TIO_GFX_BACKEND_ITERM)
+	    strip_align = cell_height_px > 0 ? cell_height_px : 1;
+	else if (display_mode == TIO_GFX_BACKEND_KITTY)
+	    strip_align = cell_height_px > 0 ? cell_height_px : 1;
+	else {
+	    fprintf(stderr, "trender_ctx_init: unknown display_mode %d\n", (int)display_mode);
+	    return -1;
+	}
 
 	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_render_ctx * sizeof(rendering_ctx_t));
 
@@ -93,17 +100,29 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		tio_gfx_params gp;
 		if (display_mode == TIO_GFX_BACKEND_SIXEL) {
 			gp = TIO_GFX_SIXEL_PARAMS(cols, rows);
-			gp.p.sixel.scale_x = sixel_scale_x;
-			gp.p.sixel.scale_y = sixel_scale_y;
+			gp.p.sixel.scale_x = upscale_x;
+			gp.p.sixel.scale_y = upscale_y;
 		} else if (display_mode == TIO_GFX_BACKEND_ITERM) {
 			gp = TIO_GFX_ITERM_PARAMS(cols, rows);
 			gp.p.iterm.encode_fmt            = iterm_encode_fmt;
 			gp.p.iterm.jpeg_quality          = iterm_jpeg_quality;
 			gp.p.iterm.png_compression_level = iterm_png_compression_level;
-			gp.p.iterm.encode_scale          = iterm_encode_scale;
-		} else {
+			gp.p.iterm.upscale_x             = upscale_x;
+			gp.p.iterm.upscale_y             = upscale_y;
+		} else if (display_mode == TIO_GFX_BACKEND_KITTY) {
+			gp = TIO_GFX_KITTY_PARAMS(cols, rows);
+			gp.p.kitty.upscale_x      = upscale_x;
+			gp.p.kitty.upscale_y      = upscale_y;
+			gp.p.kitty.cell_height_px = cell_height_px;
+			gp.p.kitty.cell_width_px  = cell_width_px;
+		} else if (display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
 			gp = TIO_GFX_HALFBLOCK_PARAMS(cols, rows);
 			gp.p.halfblock.color_mode = hb_color_mode;
+			gp.p.halfblock.upscale_x  = upscale_x;
+			gp.p.halfblock.upscale_y  = upscale_y;
+		} else {
+			fprintf(stderr, "trender_ctx_init: unknown display_mode %d\n", (int)display_mode);
+			return -1;
 		}
 		tio_gfx_init(gfx_ctx_at(ctx, 0, 0), gp);
 	} else {
@@ -132,21 +151,35 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 			tio_gfx_params gp;
 			if (display_mode == TIO_GFX_BACKEND_SIXEL) {
 				gp = TIO_GFX_SIXEL_PARAMS(cols, rows_per_thread);
-				gp.p.sixel.scale_x         = sixel_scale_x;
-				gp.p.sixel.scale_y         = sixel_scale_y;
+				gp.p.sixel.scale_x         = upscale_x;
+				gp.p.sixel.scale_y         = upscale_y;
 				gp.p.sixel.dither_offset_y = starty;
 			} else if (display_mode == TIO_GFX_BACKEND_ITERM) {
 				gp = TIO_GFX_ITERM_PARAMS(cols, rows_per_thread);
 				gp.p.iterm.encode_fmt            = iterm_encode_fmt;
 				gp.p.iterm.jpeg_quality          = iterm_jpeg_quality;
 				gp.p.iterm.png_compression_level = iterm_png_compression_level;
-				gp.p.iterm.encode_scale          = iterm_encode_scale;
-				gp.p.iterm.starty_rows    = starty / (cell_height_px > 0 ? cell_height_px : 1);
+				gp.p.iterm.upscale_x             = upscale_x;
+				gp.p.iterm.upscale_y             = upscale_y;
+				gp.p.iterm.starty_rows    = starty * upscale_y / (cell_height_px > 0 ? cell_height_px : 1);
 				gp.p.iterm.cell_height_px = cell_height_px;
-			} else {
+			} else if (display_mode == TIO_GFX_BACKEND_KITTY) {
+				gp = TIO_GFX_KITTY_PARAMS(cols, rows_per_thread);
+				gp.p.kitty.upscale_x      = upscale_x;
+				gp.p.kitty.upscale_y      = upscale_y;
+				gp.p.kitty.cell_height_px = cell_height_px;
+				gp.p.kitty.cell_width_px  = cell_width_px;
+				gp.p.kitty.starty_rows    = starty * upscale_y / (cell_height_px > 0 ? cell_height_px : 1);
+				gp.p.kitty.full_height    = (i == 1) ? rows : 0;
+			} else if (display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
 				gp = TIO_GFX_HALFBLOCK_PARAMS(cols, rows_per_thread);
 				gp.p.halfblock.color_mode      = hb_color_mode;
+				gp.p.halfblock.upscale_x       = upscale_x;
+				gp.p.halfblock.upscale_y       = upscale_y;
 				gp.p.halfblock.dither_offset_y = starty;
+			} else {
+				fprintf(stderr, "trender_ctx_init: unknown display_mode %d\n", (int)display_mode);
+				return -1;
 			}
 			tio_gfx_init_shared(
 			    ctx->gfx_ctx + (i - 1) * buffer_count,
@@ -178,12 +211,17 @@ static inline void trender_generate_frame(trender_ctx_t* ctx, mesh_t* mesh,
 		tio_gfx_ctx* sc = gfx_ctx_at(ctx, ctx->back[thread_id - 1], thread_id - 1);
 		int parts;
 		if (ctx->display_mode == TIO_GFX_BACKEND_ITERM) {
-			/* Each strip is a self-contained OSC sequence — must have all three parts. */
+			/* Each strip is a self-contained sequence — must have all three parts. */
 			parts = TIO_GFX_FULL;
-		} else {
+		} else if (ctx->display_mode == TIO_GFX_BACKEND_KITTY ||
+		           ctx->display_mode == TIO_GFX_BACKEND_SIXEL ||
+		           ctx->display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
 			parts = TIO_GFX_PAYLOAD;
 			if (thread_id == 1)                   parts |= TIO_GFX_HEADER;
 			if (thread_id == ctx->num_render_ctx) parts |= TIO_GFX_FOOTER;
+		} else {
+			fprintf(stderr, "trender_generate_frame: unknown display_mode %d\n", (int)ctx->display_mode);
+			abort();
 		}
 
 		tio_gfx_generate(sc,

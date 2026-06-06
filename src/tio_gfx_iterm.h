@@ -47,7 +47,8 @@ typedef struct {
     tio_gfx_iterm_encode_fmt encode_fmt;
     int jpeg_quality;             /* 1–100; ignored for PNG/BMP */
     int png_compression_level;    /* 0–9; ignored for BMP/JPEG; default 8 matches stb */
-    int encode_scale;             /* spatial downsample before encoding (1=full, 2=half, etc.) */
+    int upscale_x;                /* horizontal display upscale: OSC header width = width * upscale_x */
+    int upscale_y;                /* vertical display upscale:   OSC header height = height * upscale_y */
 } tio_gfx_iterm_params;
 
 #define TIO_GFX_ITERM_DEFAULT_PARAMS(w, h) \
@@ -56,7 +57,7 @@ typedef struct {
                               .encode_fmt=TIO_GFX_ITERM_FMT_PNG, \
                               .jpeg_quality=90, \
                               .png_compression_level=8, \
-                              .encode_scale=1 })
+                              .upscale_x=1, .upscale_y=1 })
 
 typedef struct {
     /* public — read after generate */
@@ -105,13 +106,12 @@ void tio_gfx_iterm_print_stats(const tio_gfx_iterm_ctx* ctx);
 #include "stb_image_write.h"
 
 /* ── Buffer capacity ─────────────────────────────────────────────────────── */
-static size_t tio_gfx__iterm_encode_buf_cap(int w, int h, int scale) {
-    int s = scale > 1 ? scale : 1;
-    return (size_t)(w / s) * (h / s) * 4 + 1024; /* safe upper bound for PNG/BMP/JPEG */
+static size_t tio_gfx__iterm_encode_buf_cap(int w, int h) {
+    return (size_t)w * h * 4 + 1024; /* safe upper bound for PNG/BMP/JPEG */
 }
 
-static size_t tio_gfx__iterm_buf_cap(int w, int h, int scale) {
-    size_t enc = tio_gfx__iterm_encode_buf_cap(w, h, scale);
+static size_t tio_gfx__iterm_buf_cap(int w, int h) {
+    size_t enc = tio_gfx__iterm_encode_buf_cap(w, h);
     return (enc + 2) / 3 * 4 + 256; /* base64 expansion + OSC/cursor overhead */
 }
 
@@ -154,47 +154,31 @@ static void tio_gfx__iterm_write_cb(void* context, void* data, int size) {
     wc->size += (size_t)size;
 }
 
-/* ── Pixel conversion: any fmt → packed RGB, with nearest-neighbor downscale ─ */
+/* ── Pixel conversion: any fmt → packed RGB ──────────────────────────────── */
 static void tio_gfx__iterm_to_rgb(unsigned char* dst, const void* pixels,
-                                    tio_gfx_pixel_fmt fmt, int w, int h, int scale) {
-    const int s  = scale > 1 ? scale : 1;
-    const int ws = w / s;
-    const int hs = h / s;
+                                    tio_gfx_pixel_fmt fmt, int w, int h) {
+    int n = w * h;
     if (fmt == TIO_GFX_FMT_RGB565) {
         const uint16_t* src = (const uint16_t*)pixels;
-        for (int row = 0; row < hs; row++) {
-            const uint16_t* srow = src + (row * s) * w;
-            for (int col = 0; col < ws; col++) {
-                uint16_t v = srow[col * s];
-                int di = (row * ws + col) * 3;
-                dst[di+0] = (unsigned char)(((v >> 11) & 0x1F) * 255 / 31);
-                dst[di+1] = (unsigned char)(((v >>  5) & 0x3F) * 255 / 63);
-                dst[di+2] = (unsigned char)( (v        & 0x1F) * 255 / 31);
-            }
+        for (int i = 0; i < n; i++) {
+            uint16_t v = src[i];
+            dst[i*3+0] = (unsigned char)(((v >> 11) & 0x1F) * 255 / 31);
+            dst[i*3+1] = (unsigned char)(((v >>  5) & 0x3F) * 255 / 63);
+            dst[i*3+2] = (unsigned char)( (v        & 0x1F) * 255 / 31);
         }
     } else if (fmt == TIO_GFX_FMT_RGBA8) {
         const unsigned char* src = (const unsigned char*)pixels;
-        for (int row = 0; row < hs; row++) {
-            const unsigned char* srow = src + (row * s) * w * 4;
-            for (int col = 0; col < ws; col++) {
-                int di = (row * ws + col) * 3;
-                int si = col * s * 4;
-                dst[di+0] = srow[si+0];
-                dst[di+1] = srow[si+1];
-                dst[di+2] = srow[si+2];
-            }
+        for (int i = 0; i < n; i++) {
+            dst[i*3+0] = src[i*4+0];
+            dst[i*3+1] = src[i*4+1];
+            dst[i*3+2] = src[i*4+2];
         }
     } else { /* BGRA8 */
         const unsigned char* src = (const unsigned char*)pixels;
-        for (int row = 0; row < hs; row++) {
-            const unsigned char* srow = src + (row * s) * w * 4;
-            for (int col = 0; col < ws; col++) {
-                int di = (row * ws + col) * 3;
-                int si = col * s * 4;
-                dst[di+0] = srow[si+2];
-                dst[di+1] = srow[si+1];
-                dst[di+2] = srow[si+0];
-            }
+        for (int i = 0; i < n; i++) {
+            dst[i*3+0] = src[i*4+2];
+            dst[i*3+1] = src[i*4+1];
+            dst[i*3+2] = src[i*4+0];
         }
     }
 }
@@ -204,14 +188,13 @@ void tio_gfx_iterm_init(tio_gfx_iterm_ctx* ctx, tio_gfx_iterm_params params) {
     ctx->_params           = params;
     ctx->width             = params.width;
     ctx->height            = params.height;
-    int s = params.encode_scale > 1 ? params.encode_scale : 1;
-    ctx->data_cap          = tio_gfx__iterm_buf_cap(params.width, params.height, s);
+    ctx->data_cap          = tio_gfx__iterm_buf_cap(params.width, params.height);
     ctx->data              = (char*)TIO_GFX_MALLOC(ctx->data_cap);
     ctx->data_size         = 0;
     ctx->total_generate_ms = 0.0;
-    ctx->_encode_buf_cap   = tio_gfx__iterm_encode_buf_cap(params.width, params.height, s);
+    ctx->_encode_buf_cap   = tio_gfx__iterm_encode_buf_cap(params.width, params.height);
     ctx->_encode_buf       = (char*)TIO_GFX_MALLOC(ctx->_encode_buf_cap);
-    ctx->_rgb_buf_cap      = (size_t)(params.width / s) * (params.height / s) * 3;
+    ctx->_rgb_buf_cap      = (size_t)params.width * params.height * 3;
     ctx->_rgb_buf          = (unsigned char*)TIO_GFX_MALLOC(ctx->_rgb_buf_cap);
     ctx->_owns_scratch     = 1;
     stbi_write_png_compression_level = params.png_compression_level;
@@ -257,10 +240,9 @@ void tio_gfx_iterm_destroy_shared(tio_gfx_iterm_ctx* ctxs, int n) {
 
 void tio_gfx_iterm_set_params(tio_gfx_iterm_ctx* ctx,
                                 tio_gfx_iterm_params params) {
-    int s = params.encode_scale > 1 ? params.encode_scale : 1;
-    size_t new_data_cap   = tio_gfx__iterm_buf_cap(params.width, params.height, s);
-    size_t new_encode_cap = tio_gfx__iterm_encode_buf_cap(params.width, params.height, s);
-    size_t new_rgb_cap    = (size_t)(params.width / s) * (params.height / s) * 3;
+    size_t new_data_cap   = tio_gfx__iterm_buf_cap(params.width, params.height);
+    size_t new_encode_cap = tio_gfx__iterm_encode_buf_cap(params.width, params.height);
+    size_t new_rgb_cap    = (size_t)params.width * params.height * 3;
     if (new_data_cap > ctx->data_cap) {
         TIO_GFX_FREE(ctx->data);
         ctx->data_cap  = new_data_cap;
@@ -293,32 +275,31 @@ void tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
     char* p = ctx->data;
     const int w  = ctx->_params.width;
     const int h  = ctx->_params.height;
-    const int s  = ctx->_params.encode_scale > 1 ? ctx->_params.encode_scale : 1;
-    const int ws = w / s;
-    const int hs = h / s;
+    const int ux = ctx->_params.upscale_x > 1 ? ctx->_params.upscale_x : 1;
+    const int uy = ctx->_params.upscale_y > 1 ? ctx->_params.upscale_y : 1;
 
     /* cursor reposition */
     p += sprintf(p, "\x1b[%d;1H", ctx->_params.starty_rows + 1);
 
-    /* OSC header uses full display dimensions so terminal scales up if needed */
-    p += sprintf(p, "\x1b]1337;File=width=%dpx;height=%dpx;inline=1:", w, h);
+    /* OSC header specifies full display size; terminal upscales the encoded image */
+    p += sprintf(p, "\x1b]1337;File=width=%dpx;height=%dpx;inline=1:", w * ux, h * uy);
 
-    /* convert pixels to packed RGB at encoded (scaled) resolution */
-    tio_gfx__iterm_to_rgb(ctx->_rgb_buf, pixels, fmt, w, h, s);
+    /* convert pixels to packed RGB */
+    tio_gfx__iterm_to_rgb(ctx->_rgb_buf, pixels, fmt, w, h);
 
-    /* encode at scaled dimensions via stb into _encode_buf */
+    /* encode via stb into _encode_buf */
     tio_gfx__iterm_wctx wc = { ctx->_encode_buf, 0 };
     switch (ctx->_params.encode_fmt) {
         case TIO_GFX_ITERM_FMT_PNG:
-            stbi_write_png_to_func(tio_gfx__iterm_write_cb, &wc, ws, hs, 3,
-                                   ctx->_rgb_buf, ws * 3);
+            stbi_write_png_to_func(tio_gfx__iterm_write_cb, &wc, w, h, 3,
+                                   ctx->_rgb_buf, w * 3);
             break;
         case TIO_GFX_ITERM_FMT_BMP:
-            stbi_write_bmp_to_func(tio_gfx__iterm_write_cb, &wc, ws, hs, 3,
+            stbi_write_bmp_to_func(tio_gfx__iterm_write_cb, &wc, w, h, 3,
                                    ctx->_rgb_buf);
             break;
         case TIO_GFX_ITERM_FMT_JPEG:
-            stbi_write_jpg_to_func(tio_gfx__iterm_write_cb, &wc, ws, hs, 3,
+            stbi_write_jpg_to_func(tio_gfx__iterm_write_cb, &wc, w, h, 3,
                                    ctx->_rgb_buf, ctx->_params.jpeg_quality);
             break;
     }
