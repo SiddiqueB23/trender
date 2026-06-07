@@ -14,8 +14,8 @@ add_compile_definitions(RESOURCES_PATH="${CMAKE_SOURCE_DIR}/resources/")
 # Platform-specific compiler flags
 if(MSVC)
   # keep optimizations, but generate PDB and ask linker to emit debug info
-  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /Qvec-report:2 /arch:AVX2 /openmp:llvm")
-  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /Qvec-report:2 /arch:AVX2 /openmp:llvm")
+  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi /O2 /arch:AVX2 /openmp:llvm")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /Zi /O2 /arch:AVX2 /openmp:llvm")
   set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /openmp:llvm")
   set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG /openmp:llvm")
 else()

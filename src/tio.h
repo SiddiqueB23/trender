@@ -302,6 +302,12 @@ int tio_init(tio_ctx_t* ctx) {
 		output_mode |= (ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT);
 		SetConsoleMode(ctx->output_handle, output_mode);
 	}
+
+	if (!SetConsoleOutputCP(CP_UTF8) || !SetConsoleCP(CP_UTF8)) {
+		fprintf(stderr, "Failed to set console code page\n");
+		return 1;
+	}
+
 	return 0;
 }
 
