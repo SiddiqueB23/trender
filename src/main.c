@@ -643,7 +643,9 @@ int main(int argc, char* argv[]) {
 		printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)args.frames);
 		printf("Frame time:    %0.2f\r\n", total_frame_time / (float)args.frames);
 		double whole_time = timer_elapsed_ms(&timer_whole);
-		trender_print_stats(&ctx, whole_time);
+		trender_print_stats(&ctx, args.frames);
+		printf("  Total time:            %0.2f\r\n", whole_time);
+
 	}
 
 	return 0;

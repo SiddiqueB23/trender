@@ -114,29 +114,6 @@ else()
   target_link_libraries(timer_test PRIVATE ${EXTRA_LIBS})
 endif()
 
-add_executable(triangle_drawing_test ${CMAKE_SOURCE_DIR}/src/triangle_drawing_test.c)
-if(UNIX)
-  target_link_libraries(triangle_drawing_test PRIVATE m ${RT_LIB} ${EXTRA_LIBS})
-else()
-  target_link_libraries(triangle_drawing_test PRIVATE ${EXTRA_LIBS})
-endif()
-
-add_executable(omp_test ${CMAKE_SOURCE_DIR}/src/omp_test.c)
-if(UNIX)
-  target_link_libraries(omp_test PRIVATE m ${RT_LIB} ${EXTRA_LIBS})
-else()
-  target_link_libraries(omp_test PRIVATE ${EXTRA_LIBS})
-endif()
-
-# Generate assembly for main.c (only on GCC/Clang, not cross-compiling)
-# if(NOT MSVC AND NOT CMAKE_CROSSCOMPILING)
-#   add_custom_target(asm_main
-#     COMMAND ${CMAKE_C_COMPILER} -Wall -Wextra -pedantic -O3 -g -march=native -mtune=native -S -fverbose-asm -o ${CMAKE_BINARY_DIR}/main.s ${CMAKE_SOURCE_DIR}/src/main.c
-#     DEPENDS ${CMAKE_SOURCE_DIR}/src/main.c
-#     COMMENT "Generating assembly: ${CMAKE_BINARY_DIR}/main.s"
-#   )
-# endif()
-
 # Default build type if not set
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)

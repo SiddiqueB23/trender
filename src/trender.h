@@ -288,32 +288,64 @@ static inline void trender_display_frame(trender_ctx_t* ctx, tio_ctx_t* tio) {
 	ctx->total_display_time += ctx->display_time;
 }
 
-static inline void trender_print_stats(trender_ctx_t* ctx, double whole_time) {
-	double total_clear_time            = ctx->render_ctx[0].total_clear_time;
-	double total_rasterisation_time    = ctx->render_ctx[0].total_rasterisation_time;
-	double total_texture_sampling_time = ctx->render_ctx[0].total_texture_sampling_time;
-	double total_generate_ms           = tio_gfx_total_ms(gfx_ctx_at(ctx, 0, 0));
-	for (int i = 1; i < ctx->num_render_ctx; i++) {
-		total_clear_time            += ctx->render_ctx[i].total_clear_time;
-		total_rasterisation_time    += ctx->render_ctx[i].total_rasterisation_time;
-		total_texture_sampling_time += ctx->render_ctx[i].total_texture_sampling_time;
+static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
+	const double inv_f = (num_frames > 0) ? 1.0 / num_frames : 0.0;
+	const int n = ctx->num_render_ctx;
+
+	/* ── Per-thread table ────────────────────────────────────────────────── */
+	printf("Per-thread totals (ms):\r\n");
+	printf("  Thread  %-12s %-12s %-12s %-12s %-12s\r\n",
+	       "Clear", "Raster", "Texture", "Generate", "Thread-total");
+	double total_clear_time            = 0.0;
+	double total_rasterisation_time    = 0.0;
+	double total_texture_sampling_time = 0.0;
+	double total_generate_ms           = 0.0;
+	for (int i = 0; i < n; i++) {
+		double cl  = ctx->render_ctx[i].total_clear_time;
+		double ra  = ctx->render_ctx[i].total_rasterisation_time;
+		double tx  = ctx->render_ctx[i].total_texture_sampling_time;
+		double gen = 0.0;
+		for (int b = 0; b < ctx->buffer_count; b++)
+			gen += tio_gfx_total_ms(gfx_ctx_at(ctx, b, i));
+		double thr = cl + ra + tx + gen;
+		printf("  %-7d %-12.2f %-12.2f %-12.2f %-12.2f %-12.2f\r\n",
+		       i + 1, cl, ra, tx, gen, thr);
+		total_clear_time            += cl;
+		total_rasterisation_time    += ra;
+		total_texture_sampling_time += tx;
+		total_generate_ms           += gen;
 	}
-	for (int b = 0; b < ctx->buffer_count; b++) {
-		for (int i = 0; i < ctx->num_render_ctx; i++) {
-			if (b == 0 && i == 0) continue;
-			total_generate_ms += tio_gfx_total_ms(gfx_ctx_at(ctx, b, i));
-		}
+
+	printf("Per-thread averages (ms/frame):\r\n");
+	printf("  Thread  %-12s %-12s %-12s %-12s %-12s\r\n",
+	       "Clear", "Raster", "Texture", "Generate", "Thread-total");
+	for (int i = 0; i < n; i++) {
+		double cl  = ctx->render_ctx[i].total_clear_time;
+		double ra  = ctx->render_ctx[i].total_rasterisation_time;
+		double tx  = ctx->render_ctx[i].total_texture_sampling_time;
+		double gen = 0.0;
+		for (int b = 0; b < ctx->buffer_count; b++)
+			gen += tio_gfx_total_ms(gfx_ctx_at(ctx, b, i));
+		printf("  %-7d %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f\r\n",
+		       i + 1, cl * inv_f, ra * inv_f, tx * inv_f, gen * inv_f,
+		       (cl + ra + tx + gen) * inv_f);
 	}
-	double total_frame_gen_time =
-		total_clear_time + total_rasterisation_time + total_texture_sampling_time +
-		total_generate_ms;
-	double unaccounted_time = whole_time - total_frame_gen_time - ctx->total_display_time;
-	printf("total_clear_time:            %0.2f\r\n", total_clear_time);
-	printf("total_rasterisation_time:    %0.2f\r\n", total_rasterisation_time);
-	printf("total_texture_sampling_time: %0.2f\r\n", total_texture_sampling_time);
-	printf("total_generate_ms:           %0.2f\r\n", total_generate_ms);
-	printf("total_frame_gen_time:        %0.2f\r\n", total_frame_gen_time);
-	printf("total_display_time:          %0.2f\r\n", ctx->total_display_time);
-	printf("Total time:                  %0.2f ms\r\n", whole_time);
-	printf("unaccounted_time:            %0.2f\r\n", unaccounted_time);
+
+	/* ── Overall totals ──────────────────────────────────────────────────── */
+	double total_frame_gen_time = total_clear_time + total_rasterisation_time +
+	                              total_texture_sampling_time + total_generate_ms;
+	printf("Overall totals (ms):\r\n");
+	printf("  clear time:            %0.2f\r\n", total_clear_time);
+	printf("  rasterisation time:    %0.2f\r\n", total_rasterisation_time);
+	printf("  texture_sampling time: %0.2f\r\n", total_texture_sampling_time);
+	printf("  generate_ms:           %0.2f\r\n", total_generate_ms);
+	printf("  frame_gen time:        %0.2f\r\n", total_frame_gen_time);
+	printf("  display time:          %0.2f\r\n", ctx->total_display_time);
+	printf("Overall averages (ms/frame):\r\n");
+	printf("  clear time:            %0.3f\r\n", total_clear_time            * inv_f);
+	printf("  rasterisation time:    %0.3f\r\n", total_rasterisation_time    * inv_f);
+	printf("  texture_sampling time: %0.3f\r\n", total_texture_sampling_time * inv_f);
+	printf("  generate_ms:           %0.3f\r\n", total_generate_ms           * inv_f);
+	printf("  frame_gen time:        %0.3f\r\n", total_frame_gen_time        * inv_f);
+	printf("  display time:          %0.3f\r\n", ctx->total_display_time     * inv_f);
 }

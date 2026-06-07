@@ -178,10 +178,6 @@ processed_vertex_t lerp_processed_vertex_pair(processed_vertex_t v0, processed_v
 void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processed_triangle_t* out2, int* num_out) {
 	*out1 = in;
 	*num_out = 1;
-	if (triangle_is_fully_clipped(in)) {
-		*num_out = 0;
-		return;
-	}
 	int vertex_count = 0;
 	if (is_inside_near_plane(in.v0)) vertex_count++;
 	if (is_inside_near_plane(in.v1)) vertex_count++;
@@ -343,6 +339,8 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t triangle, r
 	maxx = clamp_int(maxx, 0, width - 1);
 	miny = clamp_int(miny, starty, endy - 1);
 	maxy = clamp_int(maxy, starty, endy - 1);
+
+	if (minx >= maxx || miny >= maxy) return;
 
 	// Half-edge constants
 	int C1 = DY12 * X1 - DX12 * Y1;
@@ -507,6 +505,28 @@ void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, texture_atlas_t* atlas) {
 /*  Main Render Function                                       */
 /* =========================================================== */
 
+static inline processed_triangle_t make_triangle(mesh_t* mesh, int i, mat4 mvp) {
+	raw_vertex_t vert_input0 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 0]);
+	raw_vertex_t vert_input1 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 1]);
+	raw_vertex_t vert_input2 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 2]);
+
+	processed_triangle_t triangle;
+	triangle.v0 = process_vertex(vert_input0, mvp);
+	triangle.v1 = process_vertex(vert_input1, mvp);
+	triangle.v2 = process_vertex(vert_input2, mvp);
+
+	int mat_idx = mesh->attrib.material_ids[i];
+	triangle.tex_width = 0;
+	triangle.tex_height = 0;
+	triangle.diffuse_atlas_offset = 0;
+	if (mat_idx != -1) {
+		triangle.tex_width = mesh->materials[mat_idx].texture_width;
+		triangle.tex_height = mesh->materials[mat_idx].texture_height;
+		triangle.diffuse_atlas_offset = mesh->materials[mat_idx].diffuse_atlas_offset;
+	}
+	return triangle;
+}
+
 void render_mesh(mesh_t* mesh, rendering_ctx_t* ctx) {
 	timer_start(&ctx->timer);
 	clear_framebuffer_f(&ctx->depth_buffer, far_plane);
@@ -515,47 +535,26 @@ void render_mesh(mesh_t* mesh, rendering_ctx_t* ctx) {
 	double clear_time = timer_elapsed_ms(&ctx->timer);
 	ctx->total_clear_time += clear_time;
 
-	int* material_id_ptr = mesh->attrib.material_ids;
-
 	timer_start(&ctx->timer);
 	for (int i = (int)mesh->start_triangle_index; i < (int)mesh->end_triangle_index; i++) {
-		//for (int i = 216619; i < 216620; i++) {
-		//for (int i = 4; i < 5; i++) {
-		raw_vertex_t vert_input0 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 0]);
-		raw_vertex_t vert_input1 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 1]);
-		raw_vertex_t vert_input2 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 2]);
-
-		processed_vertex_t vert0 = process_vertex(vert_input0, ctx->params.model_view_projection);
-		processed_vertex_t vert1 = process_vertex(vert_input1, ctx->params.model_view_projection);
-		processed_vertex_t vert2 = process_vertex(vert_input2, ctx->params.model_view_projection);
-
-		processed_triangle_t triangle = { vert0, vert1, vert2, 0, 0, 0 };
+		processed_triangle_t triangle = make_triangle(mesh, i, ctx->params.model_view_projection);
+		if (triangle_is_fully_clipped(triangle)) {
+			continue;
+		}
+		
 		processed_triangle_t clipped_triangle0, clipped_triangle1;
 		int num_clipped_triangles = 0;
 		clip_triangle(triangle, &clipped_triangle0, &clipped_triangle1, &num_clipped_triangles);
-
-		int mat_idx = *material_id_ptr++;
-		int tex_width = 0;
-		int tex_height = 0;
-		int diffuse_atlas_offset = 0;
-		if (mat_idx != -1) {
-			tex_width = mesh->materials[mat_idx].texture_width;
-			tex_height = mesh->materials[mat_idx].texture_height;
-			diffuse_atlas_offset = mesh->materials[mat_idx].diffuse_atlas_offset;
-		}
-
-		clipped_triangle0.diffuse_atlas_offset = diffuse_atlas_offset;
-		clipped_triangle0.tex_width = tex_width;
-		clipped_triangle0.tex_height = tex_height;
-		clipped_triangle1.diffuse_atlas_offset = diffuse_atlas_offset;
-		clipped_triangle1.tex_width = tex_width;
-		clipped_triangle1.tex_height = tex_height;
-
+		clipped_triangle0.diffuse_atlas_offset = triangle.diffuse_atlas_offset;
+		clipped_triangle0.tex_width = triangle.tex_width;
+		clipped_triangle0.tex_height = triangle.tex_height;
+		clipped_triangle1.diffuse_atlas_offset = triangle.diffuse_atlas_offset;
+		clipped_triangle1.tex_width = triangle.tex_width;
+		clipped_triangle1.tex_height = triangle.tex_height;
+		
 		if (num_clipped_triangles == 0) continue;
-		if (fabsf(get_processed_triangle_area(clipped_triangle0, ctx->width, ctx->height)) < 0.01f) continue;
 		rasterize_triangle_avx2_texture_index_only(clipped_triangle0, ctx);
 		if (num_clipped_triangles == 1) continue;
-		if (fabsf(get_processed_triangle_area(clipped_triangle1, ctx->width, ctx->height)) < 0.01f) continue;
 		rasterize_triangle_avx2_texture_index_only(clipped_triangle1, ctx);
 
 	}
