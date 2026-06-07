@@ -311,12 +311,16 @@ int keep_running = 1;
 
 int main(int argc, char* argv[]) {
 
+	printf("Parsing arguments...\r\n");
 	cli_args_t args;
 	if (parse_args(argc, argv, &args) != 0) {
 		print_usage(argv[0]);
 		return 1;
 	}
 	
+	if (args.verbose) {
+		printf("Loading mesh...\r\n");
+	}
 	mesh_t mesh;
 	int ret = load_obj(args.obj_path, &mesh);
 	if (ret != 0) {

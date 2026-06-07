@@ -621,6 +621,7 @@ void tio_gfx_sixel_generate(tio_gfx_sixel_ctx* ctx,
             for (int offset = 0; offset < ctx->_params.scale_y; offset++) {
                 tio_gfx__transpose_to_columns(ctx, w, row_height, offset);
                 p = tio_gfx__encode_row(ctx, p, w, row_height);
+                if(row_start + 6 >= h) break; /* no need for CR after last band */
                 p = tio_gfx__sx_newline(p);
             }
         }

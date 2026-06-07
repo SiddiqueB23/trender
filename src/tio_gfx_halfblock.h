@@ -217,7 +217,7 @@ static unsigned char tio_gfx__hb_quantize_xterm(unsigned char val,
 /* ── Capacity ────────────────────────────────────────────────────────────── */
 static size_t tio_gfx__hb_buf_cap(int w, int h, int ux, int uy) {
     /* 28 = max color escape (combined fg+bg 24-bit), 3*ux = chars per render pixel, 10 = reset+crlf+margin */
-    size_t per_row = (size_t)w * (28 + 3 * (size_t)ux) + 10;
+    size_t per_row = (size_t)w * (32 + 3 * (size_t)ux) + 10;
     size_t n_rows  = (size_t)(h * uy + 1) / 2;
     return per_row * n_rows + 100;
 }
