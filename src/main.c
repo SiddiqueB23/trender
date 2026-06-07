@@ -324,9 +324,9 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 	
-	// if (args.verbose) {
-	// 	print_material_info(mesh.materials, mesh.num_materials);
-	// }
+	if (args.verbose) {
+		print_material_info(mesh.materials, mesh.num_materials);
+	}
 	
 	if (args.center || args.autofit) {
 		float minx, miny, minz, maxx, maxy, maxz;
@@ -341,6 +341,7 @@ int main(int argc, char* argv[]) {
 		translate_z = -(minz + maxz) / 2.0f;
 		if (args.autofit) {
 			float largest_extent = fabsf(max_float(max_float((float)(maxx - minx), (float)(maxy - miny)), (float)(maxz - minz)));
+			if (largest_extent < 1e-6f) largest_extent = 1.0f;
 			scale_x = 2.0f / largest_extent;
 			scale_y = 2.0f / largest_extent;
 			scale_z = 2.0f / largest_extent;
@@ -444,10 +445,14 @@ int main(int argc, char* argv[]) {
 	if (args.verbose)
 		printf("Output size: %d rows, %d cols\r\n", rows, cols);
 
+	if (cols <= 0 || rows <= 0) {
+		fprintf(stderr, "trender: computed output size is zero (%dx%d) — terminal may be too small\r\n", cols, rows);
+		return 1;
+	}
+
 	mat4 model_matrix, view_matrix, projection_matrix;
 	render_params_t render_params;
 	glm_mat4_identity(projection_matrix);
-	glm_translate(view_matrix, (vec3) { 0.0f, 0.0f, 0.0f });
 	glm_perspective(glm_rad(90.0f), (float)cols / (float)rows, near_plane, far_plane, projection_matrix);
 	
 	update_model_matrix(model_matrix);
@@ -535,7 +540,7 @@ int main(int argc, char* argv[]) {
 							mousex = 10 * event.position_x;
 							mousey = 20 * event.position_y;
 							mousex = clamp_int(mousex, 0, cols - 1);
-							mousey = clamp_int(mousey, 0, cols - 1);
+							mousey = clamp_int(mousey, 0, rows - 1);
 							if (event.code == LMB_DOWN) {
 								hit_triangle_idx = ray_cast(&mesh, render_params.model_view, mousex, mousey, cols, rows);
 								if (hit_triangle_idx == -1) {

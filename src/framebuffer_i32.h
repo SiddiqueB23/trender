@@ -29,7 +29,6 @@ framebuffer_i32 create_framebuffer_i32(int width, int height) {
         fprintf(stderr, "Failed to allocate memory for framebuffer\n");
         exit(1);
     }
-    memset(fb.data, 0, width * height * sizeof(int32_t)); // Initialize to 0.0f
     return fb;
 }
 

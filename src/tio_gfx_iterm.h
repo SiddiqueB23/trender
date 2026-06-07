@@ -101,6 +101,24 @@ void tio_gfx_iterm_print_stats(const tio_gfx_iterm_ctx* ctx);
 
 #include "timer.h"
 
+/* ── Integer-to-ASCII ────────────────────────────────────────────────────── */
+static char* tio_gfx__iterm_itoa(char* p, int v) {
+    if (v == 0) { *p++ = '0'; return p; }
+    char tmp[12]; char* t = tmp;
+    while (v > 0) { *t++ = (char)('0' + v % 10); v /= 10; }
+    while (t > tmp) *p++ = *--t;
+    return p;
+}
+static char* tio_gfx__iterm_itoa_lt1000(char* p, int n) {
+    int h = n / 100;
+    *p = (char)('0' + h); p += (h != 0);
+    n -= h * 100;
+    int t = n / 10;
+    *p = (char)('0' + t); p += (h + t != 0);
+    *p++ = (char)('0' + n - t * 10);
+    return p;
+}
+
 #define STBI_WRITE_NO_STDIO
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -279,10 +297,16 @@ void tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
     const int uy = ctx->_params.upscale_y > 1 ? ctx->_params.upscale_y : 1;
 
     /* cursor reposition */
-    p += sprintf(p, "\x1b[%d;1H", ctx->_params.starty_rows + 1);
+    *p++ = '\x1b'; *p++ = '[';
+    p = tio_gfx__iterm_itoa_lt1000(p, ctx->_params.starty_rows + 1);
+    memcpy(p, ";1H", 3); p += 3;
 
     /* OSC header specifies full display size; terminal upscales the encoded image */
-    p += sprintf(p, "\x1b]1337;File=width=%dpx;height=%dpx;inline=1:", w * ux, h * uy);
+    memcpy(p, "\x1b]1337;File=width=", 18); p += 18;
+    p = tio_gfx__iterm_itoa(p, w * ux);
+    memcpy(p, "px;height=", 10); p += 10;
+    p = tio_gfx__iterm_itoa(p, h * uy);
+    memcpy(p, "px;inline=1:", 12); p += 12;
 
     /* convert pixels to packed RGB */
     tio_gfx__iterm_to_rgb(ctx->_rgb_buf, pixels, fmt, w, h);

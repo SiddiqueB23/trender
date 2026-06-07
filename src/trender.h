@@ -86,13 +86,17 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	}
 
 	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_render_ctx * sizeof(rendering_ctx_t));
+	if (!ctx->render_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (render_ctx)\n"); return -1; }
 
 	if (num_threads == 1) {
 		/* Single-thread: one gfx context, no locks needed. */
 		ctx->gfx_ctx      = (tio_gfx_ctx*)malloc(sizeof(tio_gfx_ctx));
+		if (!ctx->gfx_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (gfx_ctx)\n"); return -1; }
 		ctx->buffer_locks = NULL;
 		ctx->front        = (int*)malloc(sizeof(int));
+		if (!ctx->front) { fprintf(stderr, "trender_ctx_init: out of memory (front)\n"); return -1; }
 		ctx->back         = (int*)malloc(sizeof(int));
+		if (!ctx->back)  { fprintf(stderr, "trender_ctx_init: out of memory (back)\n");  return -1; }
 		ctx->front[0]     = 0;
 		ctx->back[0]      = 0;
 
@@ -131,10 +135,14 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		 * buffer slots of the same thread. */
 		ctx->gfx_ctx      = (tio_gfx_ctx*)malloc(
 		                        ctx->num_render_ctx * buffer_count * sizeof(tio_gfx_ctx));
+		if (!ctx->gfx_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (gfx_ctx)\n"); return -1; }
 		ctx->buffer_locks = (omp_lock_t*)malloc(
 		                        buffer_count * ctx->num_render_ctx * sizeof(omp_lock_t));
+		if (!ctx->buffer_locks) { fprintf(stderr, "trender_ctx_init: out of memory (buffer_locks)\n"); return -1; }
 		ctx->front        = (int*)malloc(ctx->num_render_ctx * sizeof(int));
+		if (!ctx->front) { fprintf(stderr, "trender_ctx_init: out of memory (front)\n"); return -1; }
 		ctx->back         = (int*)malloc(ctx->num_render_ctx * sizeof(int));
+		if (!ctx->back)  { fprintf(stderr, "trender_ctx_init: out of memory (back)\n");  return -1; }
 		for (int i = 0; i < ctx->num_render_ctx; i++) {
 			ctx->front[i] = 0;
 			ctx->back[i]  = 0;

@@ -27,7 +27,6 @@ framebuffer_4i8 create_framebuffer_4i8(int width, int height) {
         fprintf(stderr, "Failed to allocate memory for framebuffer\n");
         exit(1);
     }
-    memset(fb.data, 0, width * height * 4);
     return fb;
 }
 

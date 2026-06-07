@@ -89,6 +89,29 @@ void tio_gfx_kitty_print_stats(const tio_gfx_kitty_ctx* ctx);
 
 #include "timer.h"
 
+/* ── Integer-to-ASCII ────────────────────────────────────────────────────── */
+static char* tio_gfx__kitty_itoa_lt1000(char* p, int n) {
+    int h = n / 100;
+    *p = (char)('0' + h); p += (h != 0);
+    n -= h * 100;
+    int t = n / 10;
+    *p = (char)('0' + t); p += (h + t != 0);
+    *p++ = (char)('0' + n - t * 10);
+    return p;
+}
+static char* tio_gfx__kitty_itoa_lt10000(char* p, int n) {
+    int th = n / 1000;
+    *p = (char)('0' + th); p += (th != 0);
+    n -= th * 1000;
+    int h = n / 100;
+    *p = (char)('0' + h); p += (th != 0 || h != 0);
+    n -= h * 100;
+    int t = n / 10;
+    *p = (char)('0' + t); p += (th != 0 || h != 0 || t != 0);
+    *p++ = (char)('0' + n - t * 10);
+    return p;
+}
+
 /* 4096 base64 chars = 3072 raw bytes per chunk */
 #define TIO_GFX__KITTY_CHUNK_BYTES 3072
 
@@ -247,8 +270,11 @@ void tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
     char* p = ctx->data;
 
     /* cursor reposition — header strip only */
-    if (parts & TIO_GFX_HEADER)
-        p += sprintf(p, "\x1b[%d;1H", ctx->_params.starty_rows + 1);
+    if (parts & TIO_GFX_HEADER) {
+        *p++ = '\x1b'; *p++ = '[';
+        p = tio_gfx__kitty_itoa_lt1000(p, ctx->_params.starty_rows + 1);
+        memcpy(p, ";1H", 3); p += 3;
+    }
 
     /* convert pixels to packed RGB */
     tio_gfx__kitty_to_rgb(ctx->_rgb_buf, pixels, fmt, w, h);
@@ -262,11 +288,22 @@ void tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
         if (chunk > TIO_GFX__KITTY_CHUNK_BYTES) chunk = TIO_GFX__KITTY_CHUNK_BYTES;
         int more = (offset + chunk < rgb_total) ? 1 : last_m;
         if (emit_init) {
-            p += sprintf(p, "\x1b_Ga=T,f=24,s=%d,v=%d,c=%d,r=%d,C=1,m=%d,q=2,z=-1;",
-                         w, full_h, c_cols, c_rows, more);
+            memcpy(p, "\x1b_Ga=T,f=24,s=", 14); p += 14;
+            p = tio_gfx__kitty_itoa_lt10000(p, w);
+            memcpy(p, ",v=", 3); p += 3;
+            p = tio_gfx__kitty_itoa_lt10000(p, full_h);
+            memcpy(p, ",c=", 3); p += 3;
+            p = tio_gfx__kitty_itoa_lt1000(p, c_cols);
+            memcpy(p, ",r=", 3); p += 3;
+            p = tio_gfx__kitty_itoa_lt1000(p, c_rows);
+            memcpy(p, ",C=1,m=", 7); p += 7;
+            *p++ = (char)('0' + more);
+            memcpy(p, ",q=2,z=-1;", 10); p += 10;
             emit_init = 0;
         } else {
-            p += sprintf(p, "\x1b_Gm=%d,q=2;", more);
+            memcpy(p, "\x1b_Gm=0,q=2;", 11);
+            p[5] = (char)('0' + more);
+            p += 11;
         }
         p += tio_gfx__kitty_base64_encode(p, ctx->_rgb_buf + offset, chunk);
         *p++ = '\x1b'; *p++ = '\\';

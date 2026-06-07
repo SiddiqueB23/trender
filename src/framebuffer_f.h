@@ -28,7 +28,6 @@ framebuffer_f create_framebuffer_f(int width, int height) {
 		fprintf(stderr, "Failed to allocate memory for framebuffer\n");
 		exit(1);
 	}
-	memset(fb.data, 0, width * height * sizeof(float)); // Initialize to 0.0f
 	return fb;
 }
 
