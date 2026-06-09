@@ -77,8 +77,6 @@ else()
   target_link_libraries(trender PRIVATE ${EXTRA_LIBS})
 endif()
 
-add_executable(color256_test ${CMAKE_SOURCE_DIR}/src/color256_test.c)
-
 add_executable(sixel_display_test ${CMAKE_SOURCE_DIR}/src/sixel_display_test.c)
 if(UNIX)
   target_link_libraries(sixel_display_test PRIVATE m ${RT_LIB} ${EXTRA_LIBS})

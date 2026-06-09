@@ -4,6 +4,7 @@
 #define TIO_GFX_USE_AVX2
 #define TIO_GFX_IMPLEMENTATION
 #include "tio_gfx.h"
+#include "args.h"
 #include "timer.h"
 #include "mesh_loading.h"
 #include "tio.h"
@@ -50,11 +51,18 @@ static inline void unset_lock_with_debug(omp_lock_t* lock, int thread_id, int bu
 }
 
 static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
-	int num_threads, int buffer_count, tio_gfx_backend display_mode,
-	tio_gfx_halfblock_color_mode hb_color_mode, int cell_height_px,
-	tio_gfx_iterm_encode_fmt iterm_encode_fmt,
-	int iterm_jpeg_quality, int iterm_png_compression_level,
-	int upscale_x, int upscale_y, int cell_width_px) {
+	const cli_args_t* args) {
+	int num_threads                          = args->threads;
+	int buffer_count                         = args->buffers;
+	tio_gfx_backend display_mode            = args->display_mode;
+	tio_gfx_halfblock_color_mode hb_color_mode = args->hb_color_mode;
+	int cell_height_px                       = args->cell_height_px;
+	tio_gfx_iterm_encode_fmt iterm_encode_fmt = args->iterm_encode_fmt;
+	int iterm_jpeg_quality                   = args->iterm_jpeg_quality;
+	int iterm_png_compression_level          = args->iterm_png_compression;
+	int upscale_x                            = args->upscale_x;
+	int upscale_y                            = args->upscale_y;
+	int cell_width_px                        = args->cell_width_px;
 	if (num_threads == 1) {
 		buffer_count = 1;
 	} else if (buffer_count < 3) {
@@ -210,10 +218,6 @@ static inline void trender_generate_frame(trender_ctx_t* ctx, mesh_t* mesh,
 		render_params_copy(&ctx->render_ctx[0].params, &new_params);
 		render_mesh(mesh, &ctx->render_ctx[0]);
 	} else if (thread_id >= 1) {
-#pragma omp critical
-		{
-			render_params_copy(&ctx->render_ctx[thread_id - 1].params, &new_params);
-		}
 		render_mesh(mesh, &ctx->render_ctx[thread_id - 1]);
 
 		tio_gfx_ctx* sc = gfx_ctx_at(ctx, ctx->back[thread_id - 1], thread_id - 1);

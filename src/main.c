@@ -119,195 +119,167 @@ void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float
 	}
 }
 
-/* =========================================================== */
-/*  CLI                                                        */
-/* =========================================================== */
-
-typedef struct {
-	char obj_path[512];
-	char testmodel[64];      /* name of a built-in test model, e.g. "bmw" */
-	int  width;              /* output pixel width  (0 = auto)            */
-	int  height;             /* output pixel height (0 = auto)            */
-	int  frames;             /* frames to render    (0 = auto)            */
-	int  interactive;        /* enable camera controls + HUD              */
-	int  rotate;             /* auto-rotate model each frame              */
-	int  verbose;            /* print diagnostic / timing output          */
-	int  center;             /* translate model so bounding box is at origin */
-	int  autofit;            /* center + scale model and set camera dist  */
-	int  threads;            /* number of OMP threads (default 2)         */
-	int  buffers;            /* triple-buffer count   (default 3)         */
-	tio_gfx_backend display_mode;               /* sixel, halfblock, or iterm (required)    */
-	tio_gfx_halfblock_color_mode hb_color_mode; /* 216 or 24bpp; ignored for non-halfblock */
-	tio_gfx_iterm_encode_fmt iterm_encode_fmt;  /* BMP, PNG, or JPEG; ignored for non-iterm */
-	int  iterm_jpeg_quality;                    /* 1–100; itermjpeg only                    */
-	int  iterm_png_compression;                 /* 0–9; iterm/itermpng only                 */
-	int  upscale_x;                             /* display upscale X (1=normal, 2=2× wide)  */
-	int  upscale_y;                             /* display upscale Y (1=normal, 2=2× tall)  */
-	int  cell_height_px;                        /* terminal cell height in px               */
-	int  cell_width_px;                         /* terminal cell width in px                */
-	int  display_mode_set;                      /* 0 if --display was not provided          */
-} cli_args_t;
-
-static void print_usage(const char* prog) {
-	fprintf(stderr, "Usage: %s -d sixel|halfblock[216|24bpp]|iterm [options] model.obj\r\n", prog);
-	fprintf(stderr, "       %s -d sixel|halfblock[216|24bpp]|iterm [options] --testmodel=<name>\r\n", prog);
-	fprintf(stderr, "Options:\r\n");
-	fprintf(stderr, "  -d, --display MODE    Display mode (required):\r\n");
-	fprintf(stderr, "                          sixel          — sixel graphics\r\n");
-	fprintf(stderr, "                          halfblock      — halfblock, 216-color (default)\r\n");
-	fprintf(stderr, "                          halfblock216   — halfblock, 216-color\r\n");
-	fprintf(stderr, "                          halfblock24bpp — halfblock, 24-bit true color\r\n");
-	fprintf(stderr, "                          iterm          — iTerm2 inline image, PNG (default)\r\n");
-	fprintf(stderr, "                          itermpng       — iTerm2 inline image, PNG\r\n");
-	fprintf(stderr, "                          itermbmp       — iTerm2 inline image, BMP\r\n");
-	fprintf(stderr, "                          itermjpeg      — iTerm2 inline image, JPEG\r\n");
-	fprintf(stderr, "                          kitty          — Kitty graphics protocol, RGB\r\n");
-	fprintf(stderr, "  -W, --width N         Output width in pixels  (default: auto from terminal)\r\n");
-	fprintf(stderr, "  -H, --height N        Output height in pixels (default: auto from terminal)\r\n");
-	fprintf(stderr, "  -n, --frames N        Number of frames to render (default: 1)\r\n");
-	fprintf(stderr, "  -i, --interactive     Interactive mode with camera controls\r\n");
-	fprintf(stderr, "  -r, --rotate          Auto-rotate the model\r\n");
-	fprintf(stderr, "  -v, --verbose         Print diagnostic and timing output\r\n");
-	fprintf(stderr, "  -c, --center          Translate model so its bounding box is at origin\r\n");
-	fprintf(stderr, "  -f, --autofit         Center, scale model and set camera distance\r\n");
-	fprintf(stderr, "  -t, --threads N       Number of threads (default: 2)\r\n");
-	fprintf(stderr, "  -B, --buffers N       Buffer count      (default: 3)\r\n");
-	fprintf(stderr, "      --jpeg-quality N  JPEG quality 1–100 (default: 90; higher=better quality/larger; itermjpeg only)\r\n");
-	fprintf(stderr, "      --png-compression N  PNG compression 0–9 (default: 8; higher=smaller file/slower; iterm/itermpng only)\r\n");
-	fprintf(stderr, "  --display-upscale-x N, -dux N\r\n");
-	fprintf(stderr, "                        Upscale display N× horizontally (default: 1; all pixel backends)\r\n");
-	fprintf(stderr, "  --display-upscale-y N, -duy N\r\n");
-	fprintf(stderr, "                        Upscale display N× vertically   (default: 1; all pixel backends)\r\n");
-	fprintf(stderr, "      --testmodel=NAME  Use a built-in test model (e.g. bmw)\r\n");
-	fprintf(stderr, "  -h, --help            Show this help\r\n");
-}
-
-static int parse_args(int argc, char* argv[], cli_args_t* args) {
-	args->obj_path[0]      = '\0';
-	args->testmodel[0]     = '\0';
-	args->width            = 0;
-	args->height           = 0;
-	args->frames           = 0;
-	args->interactive      = 0;
-	args->rotate           = 0;
-	args->verbose          = 0;
-	args->center           = 0;
-	args->autofit          = 0;
-	args->threads          = 2;
-	args->buffers          = 3;
-	args->display_mode     = TIO_GFX_BACKEND_SIXEL;
-	args->hb_color_mode    = TIO_GFX_HALFBLOCK_COLOR_216;
-	args->iterm_encode_fmt    = TIO_GFX_ITERM_FMT_PNG;
-	args->iterm_jpeg_quality    = 90;
-	args->iterm_png_compression = 8;
-	args->upscale_x             = 1;
-	args->upscale_y             = 1;
-	args->cell_height_px        = 1;
-	args->cell_width_px         = 1;
-	args->display_mode_set = 0;
-
-	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			return -1;
-		} else if ((strcmp(argv[i], "--display") == 0 || strcmp(argv[i], "-d") == 0) && i + 1 < argc) {
-			i++;
-			if (strcmp(argv[i], "sixel") == 0) {
-				args->display_mode = TIO_GFX_BACKEND_SIXEL;
-			} else if (strcmp(argv[i], "halfblock") == 0 || strcmp(argv[i], "halfblock216") == 0) {
-				args->display_mode  = TIO_GFX_BACKEND_HALFBLOCK;
-				args->hb_color_mode = TIO_GFX_HALFBLOCK_COLOR_216;
-			} else if (strcmp(argv[i], "halfblock24bpp") == 0) {
-				args->display_mode  = TIO_GFX_BACKEND_HALFBLOCK;
-				args->hb_color_mode = TIO_GFX_HALFBLOCK_COLOR_24BIT;
-			} else if (strcmp(argv[i], "iterm") == 0 || strcmp(argv[i], "itermpng") == 0) {
-				args->display_mode     = TIO_GFX_BACKEND_ITERM;
-				args->iterm_encode_fmt = TIO_GFX_ITERM_FMT_PNG;
-			} else if (strcmp(argv[i], "itermbmp") == 0) {
-				args->display_mode     = TIO_GFX_BACKEND_ITERM;
-				args->iterm_encode_fmt = TIO_GFX_ITERM_FMT_BMP;
-			} else if (strcmp(argv[i], "itermjpeg") == 0) {
-				args->display_mode     = TIO_GFX_BACKEND_ITERM;
-				args->iterm_encode_fmt = TIO_GFX_ITERM_FMT_JPEG;
-			} else if (strcmp(argv[i], "kitty") == 0) {
-				args->display_mode = TIO_GFX_BACKEND_KITTY;
-			} else {
-				fprintf(stderr, "trender: unknown display mode '%s' (use 'sixel', 'halfblock', 'halfblock216', 'halfblock24bpp', 'iterm', 'itermpng', 'itermbmp', 'itermjpeg', or 'kitty')\r\n", argv[i]);
-				return -1;
-			}
-			args->display_mode_set = 1;
-		} else if ((strcmp(argv[i], "--width") == 0 || strcmp(argv[i], "-W") == 0) && i + 1 < argc) {
-			args->width = atoi(argv[++i]);
-		} else if ((strcmp(argv[i], "--height") == 0 || strcmp(argv[i], "-H") == 0) && i + 1 < argc) {
-			args->height = atoi(argv[++i]);
-		} else if ((strcmp(argv[i], "--frames") == 0 || strcmp(argv[i], "-n") == 0) && i + 1 < argc) {
-			args->frames = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
-			args->interactive = 1;
-		} else if (strcmp(argv[i], "--rotate") == 0 || strcmp(argv[i], "-r") == 0) {
-			args->rotate = 1;
-		} else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
-			args->verbose = 1;
-		} else if (strcmp(argv[i], "--center") == 0 || strcmp(argv[i], "-c") == 0) {
-			args->center = 1;
-		} else if (strcmp(argv[i], "--autofit") == 0 || strcmp(argv[i], "-f") == 0) {
-			args->autofit = 1;
-		} else if ((strcmp(argv[i], "--threads") == 0 || strcmp(argv[i], "-t") == 0) && i + 1 < argc) {
-			args->threads = atoi(argv[++i]);
-		} else if ((strcmp(argv[i], "--buffers") == 0 || strcmp(argv[i], "-B") == 0) && i + 1 < argc) {
-			args->buffers = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "--jpeg-quality") == 0 && i + 1 < argc) {
-			args->iterm_jpeg_quality = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "--png-compression") == 0 && i + 1 < argc) {
-			args->iterm_png_compression = atoi(argv[++i]);
-		} else if ((strcmp(argv[i], "--display-upscale-x") == 0 || strcmp(argv[i], "-dux") == 0) && i + 1 < argc) {
-			args->upscale_x = atoi(argv[++i]);
-			if (args->upscale_x < 1) args->upscale_x = 1;
-		} else if ((strcmp(argv[i], "--display-upscale-y") == 0 || strcmp(argv[i], "-duy") == 0) && i + 1 < argc) {
-			args->upscale_y = atoi(argv[++i]);
-			if (args->upscale_y < 1) args->upscale_y = 1;
-		} else if (strncmp(argv[i], "--testmodel=", 12) == 0) {
-			strncpy(args->testmodel, argv[i] + 12, sizeof(args->testmodel) - 1);
-			args->testmodel[sizeof(args->testmodel) - 1] = '\0';
-		} else if (argv[i][0] != '-') {
-			strncpy(args->obj_path, argv[i], sizeof(args->obj_path) - 1);
-			args->obj_path[sizeof(args->obj_path) - 1] = '\0';
+int compute_display_size(cli_args_t* args, int* out_rows, int* out_cols) {
+	int term_rows = 0, term_cols = 0;
+	if (tio_get_window_size(&tio_ctx, &term_rows, &term_cols) == -1) {
+		fprintf(stderr, "Unable to get window size\r\n");
+		return 1;
+	}
+	if (args->verbose)
+		printf("Terminal size: %d rows, %d cols\r\n", term_rows, term_cols);
+	int rows, cols;
+	if (args->display_mode == TIO_GFX_BACKEND_SIXEL) {
+		int pixel_w = 0, pixel_h = 0;
+		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
+		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
+			pixel_w = 960;
+			pixel_h = 540;
+			if (args->verbose)
+				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
 		} else {
-			fprintf(stderr, "trender: unknown option '%s'\r\n", argv[i]);
-			return -1;
+			if (args->verbose)
+				printf("Pixel size: %dx%d%s\r\n",
+				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
 		}
+		cols = (args->width  > 0) ? args->width  : pixel_w;
+		rows = (args->height > 0) ? args->height : pixel_h;
+		/* Align to multiples of (8*scale_x) and (6*scale_y) so that after
+		 * dividing by scale the render dimensions are still aligned to 8 and 6. */
+		cols -= cols % (8 * args->upscale_x);
+		rows -= rows % (6 * args->upscale_y);
+		cols /= args->upscale_x;
+		rows /= args->upscale_y;
+	} else if (args->display_mode == TIO_GFX_BACKEND_ITERM) {
+		int pixel_w = 0, pixel_h = 0;
+		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
+		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
+			pixel_w = 960;
+			pixel_h = 540;
+			if (args->verbose)
+				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
+		} else {
+			if (args->verbose)
+				printf("Pixel size: %dx%d%s\r\n",
+				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
+		}
+		cols = (args->width  > 0) ? args->width  : pixel_w;
+		rows = (args->height > 0) ? args->height : pixel_h;
+		args->cell_height_px = (term_rows > 0 && pixel_h > 0) ? pixel_h / term_rows : 1;
+		if (args->cell_height_px < 1) args->cell_height_px = 1;
+		cols -= cols % (8 * args->upscale_x);
+		rows -= rows % (args->cell_height_px * args->upscale_y);
+		cols /= args->upscale_x;
+		rows /= args->upscale_y;
+	} else if (args->display_mode == TIO_GFX_BACKEND_KITTY) {
+		int pixel_w = 0, pixel_h = 0;
+		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
+		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
+			pixel_w = 960;
+			pixel_h = 540;
+			if (args->verbose)
+				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
+		} else {
+			if (args->verbose)
+				printf("Pixel size: %dx%d%s\r\n",
+				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
+		}
+		cols = (args->width  > 0) ? args->width  : pixel_w;
+		rows = (args->height > 0) ? args->height : pixel_h;
+		args->cell_height_px = (term_rows > 0 && pixel_h > 0) ? pixel_h / term_rows : 1;
+		args->cell_width_px  = (term_cols > 0 && pixel_w > 0) ? pixel_w / term_cols : 1;
+		if (args->cell_height_px < 1) args->cell_height_px = 1;
+		if (args->cell_width_px  < 1) args->cell_width_px  = 1;
+		cols -= cols % (8 * args->upscale_x);
+		rows -= rows % (args->cell_height_px * args->upscale_y);
+		cols /= args->upscale_x;
+		rows /= args->upscale_y;
+	} else if (args->display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
+		cols = (args->width  > 0) ? args->width  : term_cols;
+		rows = (args->height > 0) ? args->height : term_rows * 2;
+		cols -= cols % (8 * args->upscale_x);
+		rows -= rows % (2 * args->upscale_y);
+		cols /= args->upscale_x;
+		rows /= args->upscale_y;
+	} else {
+		fprintf(stderr, "trender: unknown display mode %d\r\n", (int)args->display_mode);
+		return 1;
 	}
-
-	if (!args->display_mode_set) {
-		fprintf(stderr, "trender: --display is required\r\n");
-		return -1;
-	}
-
-	if (args->testmodel[0] != '\0' && args->obj_path[0] == '\0') {
-		snprintf(args->obj_path, sizeof(args->obj_path),
-		         RESOURCES_PATH "%s/%s.obj", args->testmodel, args->testmodel);
-	}
-
-	if (args->obj_path[0] == '\0') {
-		fprintf(stderr, "trender: no input file specified\r\n");
-		return -1;
-	}
-
-	if (args->frames == 0)
-		args->frames = args->interactive ? 100000 : 1;
-
-	if (args->threads == 1) {
-		args->buffers = 1;
-	} else if (args->buffers < 3) {
-		fprintf(stderr, "trender: --buffers must be at least 3 when using multiple threads (deadlock risk)\r\n");
-		return -1;
-	}
-
+	*out_rows = rows;
+	*out_cols = cols;
 	return 0;
 }
 
-/* =========================================================== */
-
 int keep_running = 1;
+render_params_t render_params;
+omp_lock_t input_state_lock;
+
+void handle_input(int thread_id, cli_args_t args,
+	mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix, 
+	trender_ctx_t* ctx,
+	int* thread_keeps_running) {
+	if (thread_id == 0) {
+		if (args.interactive) {
+			int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
+			int event_bytes_processed = 0;
+			while (event_bytes_processed < current_event_queue_bytes_size) {
+				tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
+				int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
+				event_bytes_processed += bytes_processed;
+				if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
+					if (event.code == UPPERCASE_Q || event.code == CTRL_Q) {
+						*thread_keeps_running = 0;
+						break;
+					}
+					switch (event.code) {
+					case 'w':
+					case 'a':
+					case 's':
+					case 'd':
+					case 'q':
+					case 'e':
+					case ARROW_UP:
+					case ARROW_DOWN:
+					case ARROW_RIGHT:
+					case ARROW_LEFT:
+						first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, &render_params);
+						break;
+					}
+				}
+				// else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
+				// 	mousex = 10 * event.position_x;
+				// 	mousey = 20 * event.position_y;
+				// 	mousex = clamp_int(mousex, 0, cols - 1);
+				// 	mousey = clamp_int(mousey, 0, rows - 1);
+				// 	if (event.code == LMB_DOWN) {
+				// 		hit_triangle_idx = ray_cast(&mesh, render_params.model_view, mousex, mousey, cols, rows);
+				// 		if (hit_triangle_idx == -1) {
+				// 			mesh.start_triangle_index = 0;
+				// 			mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+				// 		}
+				// 		else {
+				// 			mesh.start_triangle_index = hit_triangle_idx;
+				// 			mesh.end_triangle_index = hit_triangle_idx + 1;
+				// 		}
+				// 	}
+				// }
+			}
+		}
+		if (args.rotate) {
+			rotate_angle += 1.0f;
+		}
+		update_model_matrix(model_matrix);
+
+		omp_set_lock(&input_state_lock);
+		keep_running = *thread_keeps_running;
+		update_matrices(model_matrix, view_matrix, projection_matrix, &render_params);
+		omp_unset_lock(&input_state_lock);
+	} else {
+		omp_set_lock(&input_state_lock);
+		*thread_keeps_running = keep_running;
+		render_params_copy(&ctx->render_ctx[thread_id - 1].params, &render_params);
+		omp_unset_lock(&input_state_lock);
+	}
+}
 
 int main(int argc, char* argv[]) {
 
@@ -360,92 +332,11 @@ int main(int argc, char* argv[]) {
 	tio_init(&tio_ctx);
 	atexit(cleanup);
 	
-	int term_rows = 0, term_cols = 0;
-	if (tio_get_window_size(&tio_ctx, &term_rows, &term_cols) == -1) {
-		fprintf(stderr, "Unable to get window size\r\n");
-		return 1;
-	}
-	if (args.verbose)
-		printf("Terminal size: %d rows, %d cols\r\n", term_rows, term_cols);
-
 	int rows, cols;
-	if (args.display_mode == TIO_GFX_BACKEND_SIXEL) {
-		int pixel_w = 0, pixel_h = 0;
-		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
-		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
-			pixel_w = 960;
-			pixel_h = 540;
-			if (args.verbose)
-				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
-		} else {
-			if (args.verbose)
-				printf("Pixel size: %dx%d%s\r\n",
-				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
-		}
-		cols = (args.width  > 0) ? args.width  : pixel_w;
-		rows = (args.height > 0) ? args.height : pixel_h;
-		/* Align to multiples of (8*scale_x) and (6*scale_y) so that after
-		 * dividing by scale the render dimensions are still aligned to 8 and 6. */
-		cols -= cols % (8 * args.upscale_x);
-		rows -= rows % (6 * args.upscale_y);
-		cols /= args.upscale_x;
-		rows /= args.upscale_y;
-	} else if (args.display_mode == TIO_GFX_BACKEND_ITERM) {
-		int pixel_w = 0, pixel_h = 0;
-		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
-		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
-			pixel_w = 960;
-			pixel_h = 540;
-			if (args.verbose)
-				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
-		} else {
-			if (args.verbose)
-				printf("Pixel size: %dx%d%s\r\n",
-				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
-		}
-		cols = (args.width  > 0) ? args.width  : pixel_w;
-		rows = (args.height > 0) ? args.height : pixel_h;
-		args.cell_height_px = (term_rows > 0 && pixel_h > 0) ? pixel_h / term_rows : 1;
-		if (args.cell_height_px < 1) args.cell_height_px = 1;
-		cols -= cols % (8 * args.upscale_x);
-		rows -= rows % (args.cell_height_px * args.upscale_y);
-		cols /= args.upscale_x;
-		rows /= args.upscale_y;
-	} else if (args.display_mode == TIO_GFX_BACKEND_KITTY) {
-		int pixel_w = 0, pixel_h = 0;
-		int ret = tio_get_window_size_pixels(&tio_ctx, &pixel_w, &pixel_h);
-		if (ret == -1 || pixel_w <= 0 || pixel_h <= 0) {
-			pixel_w = 960;
-			pixel_h = 540;
-			if (args.verbose)
-				printf("Pixel size: unavailable, using default %dx%d\r\n", pixel_w, pixel_h);
-		} else {
-			if (args.verbose)
-				printf("Pixel size: %dx%d%s\r\n",
-				       pixel_w, pixel_h, ret == 1 ? " [estimated]" : "");
-		}
-		cols = (args.width  > 0) ? args.width  : pixel_w;
-		rows = (args.height > 0) ? args.height : pixel_h;
-		args.cell_height_px = (term_rows > 0 && pixel_h > 0) ? pixel_h / term_rows : 1;
-		args.cell_width_px  = (term_cols > 0 && pixel_w > 0) ? pixel_w / term_cols : 1;
-		if (args.cell_height_px < 1) args.cell_height_px = 1;
-		if (args.cell_width_px  < 1) args.cell_width_px  = 1;
-		cols -= cols % (8 * args.upscale_x);
-		rows -= rows % (args.cell_height_px * args.upscale_y);
-		cols /= args.upscale_x;
-		rows /= args.upscale_y;
-	} else if (args.display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
-		cols = (args.width  > 0) ? args.width  : term_cols;
-		rows = (args.height > 0) ? args.height : term_rows * 2;
-		cols -= cols % (8 * args.upscale_x);
-		rows -= rows % (2 * args.upscale_y);
-		cols /= args.upscale_x;
-		rows /= args.upscale_y;
-	} else {
-		fprintf(stderr, "trender: unknown display mode %d\r\n", (int)args.display_mode);
+	if (compute_display_size(&args, &rows, &cols) != 0) {
 		return 1;
 	}
-	
+
 	if (args.verbose)
 		printf("Output size: %d rows, %d cols\r\n", rows, cols);
 
@@ -455,7 +346,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	mat4 model_matrix, view_matrix, projection_matrix;
-	render_params_t render_params;
 	glm_mat4_identity(projection_matrix);
 	glm_perspective(glm_rad(90.0f), (float)cols / (float)rows, near_plane, far_plane, projection_matrix);
 	
@@ -471,9 +361,11 @@ int main(int argc, char* argv[]) {
 	fflush(stdout);
 	
 	trender_ctx_t ctx;
-	if (trender_ctx_init(&ctx, rows, cols, args.threads, args.buffers, args.display_mode, args.hb_color_mode, args.cell_height_px, args.iterm_encode_fmt, args.iterm_jpeg_quality, args.iterm_png_compression, args.upscale_x, args.upscale_y, args.cell_width_px) != 0)
+	if (trender_ctx_init(&ctx, rows, cols, &args) != 0)
 		return 1;
 	
+	omp_init_lock(&input_state_lock);
+
 	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
 	
@@ -484,13 +376,13 @@ int main(int argc, char* argv[]) {
 	double total_frame_time = 0.0;
 	double current_end_time = 0.0;
 	
-	int hit_triangle_idx = -1;
+	// int hit_triangle_idx = -1;
 	
 #pragma omp parallel num_threads(args.threads) default(shared)
 	{
 		int thread_id = omp_get_thread_num();
-		int num_frames = args.frames;
-		int num_frame_counter = num_frames;
+		int num_frame_counter = args.frames;
+		int thread_keeps_running = 1;
 		trender_generate_frame(&ctx, &mesh, render_params, thread_id, 0);
 #pragma omp barrier
 		if (ctx.num_threads >= 2 && thread_id == 0) {
@@ -500,74 +392,11 @@ int main(int argc, char* argv[]) {
 		}
 #pragma omp barrier
 		while (num_frame_counter--) {
-			int thread_keeps_running = 0;
-#pragma omp critical
-			{
-				thread_keeps_running = keep_running;
-			}
+			handle_input(thread_id, args, model_matrix, view_matrix, projection_matrix, &ctx, &thread_keeps_running);
 			if (thread_keeps_running == 0) {
 				break;
 			}
-			if (thread_id == 0)
-			{
-				if (args.interactive) {
-					int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
-					int event_bytes_processed = 0;
-					while (event_bytes_processed < current_event_queue_bytes_size) {
-						tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
-						int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
-						event_bytes_processed += bytes_processed;
-						if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
-							if (event.code == UPPERCASE_Q || event.code == CTRL_Q) {
-#pragma omp critical
-								{
-									keep_running = 0;
-								}
-								break;
-							}
-							switch (event.code) {
-							case 'w':
-							case 'a':
-							case 's':
-							case 'd':
-							case 'q':
-							case 'e':
-							case ARROW_UP:
-							case ARROW_DOWN:
-							case ARROW_RIGHT:
-							case ARROW_LEFT:
-								first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, &render_params);
-								break;
-							}
-						}
-						else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
-							mousex = 10 * event.position_x;
-							mousey = 20 * event.position_y;
-							mousex = clamp_int(mousex, 0, cols - 1);
-							mousey = clamp_int(mousey, 0, rows - 1);
-							if (event.code == LMB_DOWN) {
-								hit_triangle_idx = ray_cast(&mesh, render_params.model_view, mousex, mousey, cols, rows);
-								if (hit_triangle_idx == -1) {
-									mesh.start_triangle_index = 0;
-									mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
-								}
-								else {
-									mesh.start_triangle_index = hit_triangle_idx;
-									mesh.end_triangle_index = hit_triangle_idx + 1;
-								}
-							}
-						}
-					}
-				}
-				if (args.rotate) {
-					rotate_angle += 1.0f;
-				}
-				update_model_matrix(model_matrix);
-			}
-#pragma omp critical
-			{
-				update_matrices(model_matrix, view_matrix, projection_matrix, &render_params);
-			}
+
 			trender_generate_frame(&ctx, &mesh, render_params, thread_id, 1);
 			if (thread_id == 0) {
 				trender_display_frame(&ctx, &tio_ctx);
@@ -584,7 +413,6 @@ int main(int argc, char* argv[]) {
 					printf("\x1b[H");    // Move cursor to home
 					printf("\r\n");
 					printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
-					printf("Ray Intersected Triangle Index: %d                \r\n", hit_triangle_idx);
 					printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", camera_x, camera_y, camera_z);
 					printf("Processing:    %0.2f                              \r\n", processing_time);
 					printf("Display:       %0.2f                              \r\n", ctx.display_time);
@@ -594,10 +422,6 @@ int main(int argc, char* argv[]) {
 			}
 		}
 		if (thread_id == 0) {
-#pragma omp critical
-			{
-				keep_running = 0;
-			}
 			if (ctx.num_threads == 2) {
 				unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[0], 0), 0, ctx.front[0], 0);
 			}
@@ -644,7 +468,7 @@ int main(int argc, char* argv[]) {
 		printf("Frame time:    %0.2f\r\n", total_frame_time / (float)args.frames);
 		double whole_time = timer_elapsed_ms(&timer_whole);
 		trender_print_stats(&ctx, args.frames);
-		printf("  Total time:            %0.2f\r\n", whole_time);
+		printf("Total time:            %0.2f\r\n", whole_time);
 
 	}
 
