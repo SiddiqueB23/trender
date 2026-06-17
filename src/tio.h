@@ -51,7 +51,7 @@ int enable_raw_mode(tio_ctx_t* ctx) {
 
 	raw = ctx->orig_termios;
 	raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-	raw.c_oflag &= ~(OPOST);
+	// raw.c_oflag &= ~(OPOST);
 	raw.c_cflag |= (CS8);
 	// raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
 	raw.c_lflag &= ~(ECHO | ICANON | IEXTEN);

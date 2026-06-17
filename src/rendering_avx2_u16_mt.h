@@ -337,10 +337,12 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t triangle, r
 	maxx = (maxx + 7) - (maxx + 7) % 8;
 	minx = clamp_int(minx, 0, width - 1);
 	maxx = clamp_int(maxx, 0, width - 1);
-	miny = clamp_int(miny, starty, endy - 1);
-	maxy = clamp_int(maxy, starty, endy - 1);
-
-	if (minx >= maxx || miny >= maxy) return;
+	// miny = clamp_int(miny, starty, endy - 1);
+	// maxy = clamp_int(maxy, starty, endy - 1);
+	miny = max_int(miny, starty);
+	maxy = min_int(maxy, endy - 1);
+	
+	if (minx > maxx || miny > maxy) return;
 
 	// Half-edge constants
 	int C1 = DY12 * X1 - DX12 * Y1;

@@ -54,9 +54,6 @@ typedef struct {
 
 typedef struct {
     /* public — read after generate */
-    char*   data;
-    size_t  data_size;
-    size_t  data_cap;
     int     width, height;
 
     /* stats */
@@ -64,24 +61,22 @@ typedef struct {
 
     /* private */
     tio_gfx_halfblock_params _params;
-    int _owns_scratch;  /* always 0 — no scratch needed */
 } tio_gfx_halfblock_ctx;
 
 /* ── Declarations ────────────────────────────────────────────────────────── */
-void tio_gfx_halfblock_init(tio_gfx_halfblock_ctx* ctx,
-                              tio_gfx_halfblock_params params);
-void tio_gfx_halfblock_destroy(tio_gfx_halfblock_ctx* ctx);
-void tio_gfx_halfblock_init_shared(tio_gfx_halfblock_ctx* ctxs, int n,
+void   tio_gfx_halfblock_init(tio_gfx_halfblock_ctx* ctx,
+                               tio_gfx_halfblock_params params);
+void   tio_gfx_halfblock_destroy(tio_gfx_halfblock_ctx* ctx);
+void   tio_gfx_halfblock_set_params(tio_gfx_halfblock_ctx* ctx,
                                     tio_gfx_halfblock_params params);
-void tio_gfx_halfblock_destroy_shared(tio_gfx_halfblock_ctx* ctxs, int n);
-void tio_gfx_halfblock_set_params(tio_gfx_halfblock_ctx* ctx,
-                                   tio_gfx_halfblock_params params);
-void tio_gfx_halfblock_generate(tio_gfx_halfblock_ctx* ctx,
-                                  const void* pixels,
-                                  tio_gfx_pixel_fmt fmt,
-                                  int parts);
-void tio_gfx_halfblock_reset_stats(tio_gfx_halfblock_ctx* ctx);
-void tio_gfx_halfblock_print_stats(const tio_gfx_halfblock_ctx* ctx);
+int    tio_gfx_halfblock_generate(tio_gfx_halfblock_ctx* ctx,
+                                   const void* pixels,
+                                   tio_gfx_pixel_fmt fmt,
+                                   int parts,
+                                   char* out_buf, size_t out_cap);
+size_t tio_gfx_halfblock_output_size_hint(tio_gfx_halfblock_params params);
+void   tio_gfx_halfblock_reset_stats(tio_gfx_halfblock_ctx* ctx);
+void   tio_gfx_halfblock_print_stats(const tio_gfx_halfblock_ctx* ctx);
 
 /* ═══════════════════════════════════════════════════════════════════════════
    IMPLEMENTATION — define TIO_GFX_HALFBLOCK_IMPLEMENTATION in exactly one TU
@@ -228,56 +223,22 @@ void tio_gfx_halfblock_init(tio_gfx_halfblock_ctx* ctx,
     ctx->_params           = params;
     ctx->width             = params.width;
     ctx->height            = params.height;
-    ctx->data_cap          = tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
-    ctx->data              = (char*)TIO_GFX_MALLOC(ctx->data_cap);
-    ctx->data_size         = 0;
     ctx->total_generate_ms = 0.0;
-    ctx->_owns_scratch     = 0;
 }
 
 void tio_gfx_halfblock_destroy(tio_gfx_halfblock_ctx* ctx) {
-    TIO_GFX_FREE(ctx->data);
-    ctx->data      = NULL;
-    ctx->data_cap  = 0;
-    ctx->data_size = 0;
-}
-
-void tio_gfx_halfblock_init_shared(tio_gfx_halfblock_ctx* ctxs, int n,
-                                    tio_gfx_halfblock_params params) {
-    size_t cap = tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
-    for (int i = 0; i < n; i++) {
-        ctxs[i]._params           = params;
-        ctxs[i].width             = params.width;
-        ctxs[i].height            = params.height;
-        ctxs[i].data_cap          = cap;
-        ctxs[i].data              = (char*)TIO_GFX_MALLOC(cap);
-        ctxs[i].data_size         = 0;
-        ctxs[i].total_generate_ms = 0.0;
-        ctxs[i]._owns_scratch     = 0;
-    }
-}
-
-void tio_gfx_halfblock_destroy_shared(tio_gfx_halfblock_ctx* ctxs, int n) {
-    for (int i = 0; i < n; i++) {
-        TIO_GFX_FREE(ctxs[i].data);
-        ctxs[i].data      = NULL;
-        ctxs[i].data_size = 0;
-        ctxs[i].data_cap  = 0;
-    }
+    (void)ctx;
 }
 
 void tio_gfx_halfblock_set_params(tio_gfx_halfblock_ctx* ctx,
                                    tio_gfx_halfblock_params params) {
-    size_t new_cap = tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
-    if (new_cap > ctx->data_cap) {
-        TIO_GFX_FREE(ctx->data);
-        ctx->data_cap  = new_cap;
-        ctx->data      = (char*)TIO_GFX_MALLOC(new_cap);
-        ctx->data_size = 0;
-    }
     ctx->_params = params;
     ctx->width   = params.width;
     ctx->height  = params.height;
+}
+
+size_t tio_gfx_halfblock_output_size_hint(tio_gfx_halfblock_params params) {
+    return tio_gfx__hb_buf_cap(params.width, params.height, params.upscale_x, params.upscale_y);
 }
 
 /* ── Payload generators ──────────────────────────────────────────────────── */
@@ -391,12 +352,14 @@ static char* tio_gfx__hb_payload_216(tio_gfx_halfblock_ctx* ctx,
 }
 
 /* ── Generate ────────────────────────────────────────────────────────────── */
-void tio_gfx_halfblock_generate(tio_gfx_halfblock_ctx* ctx,
-                                  const void* pixels,
-                                  tio_gfx_pixel_fmt fmt,
-                                  int parts) {
+int tio_gfx_halfblock_generate(tio_gfx_halfblock_ctx* ctx,
+                                const void* pixels,
+                                tio_gfx_pixel_fmt fmt,
+                                int parts,
+                                char* out_buf, size_t out_cap) {
     monotonic_timer_t _t; timer_start(&_t);
-    char* p = ctx->data;
+    char* p = out_buf;
+    (void)out_cap;
 
     if (parts & TIO_GFX_HEADER) {
         memcpy(p, "\x1b[H", 3); p += 3;
@@ -415,8 +378,8 @@ void tio_gfx_halfblock_generate(tio_gfx_halfblock_ctx* ctx,
         *p = '\0';
     }
 
-    ctx->data_size          = (size_t)(p - ctx->data);
     ctx->total_generate_ms += timer_elapsed_ms(&_t);
+    return (int)(p - out_buf);
 }
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */
@@ -426,8 +389,8 @@ void tio_gfx_halfblock_reset_stats(tio_gfx_halfblock_ctx* ctx) {
 
 void tio_gfx_halfblock_print_stats(const tio_gfx_halfblock_ctx* ctx) {
     fprintf(stderr,
-            "[tio_gfx_halfblock] generate total: %.2f ms | last output: %zu bytes\n",
-            ctx->total_generate_ms, ctx->data_size);
+            "[tio_gfx_halfblock] generate total: %.2f ms\n",
+            ctx->total_generate_ms);
 }
 
 #endif /* TIO_GFX_HALFBLOCK_IMPLEMENTATION */

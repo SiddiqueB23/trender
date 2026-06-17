@@ -62,6 +62,8 @@ int main(int argc, char** argv) {
     tio_gfx_halfblock_init(&ctx, params);
 
     unsigned char* pixels = (unsigned char*)malloc((size_t)(render_w * render_h * 4));
+    size_t out_cap = tio_gfx_halfblock_output_size_hint(params);
+    char*  out_buf = (char*)malloc(out_cap);
 
     monotonic_timer_t t;
     double total_fill_ms = 0.0, total_write_ms = 0.0;
@@ -83,13 +85,13 @@ int main(int argc, char** argv) {
         }
         total_fill_ms += timer_elapsed_ms(&t);
 
-        tio_gfx_halfblock_generate(&ctx, pixels, TIO_GFX_FMT_RGBA8, TIO_GFX_FULL);
+        int n = tio_gfx_halfblock_generate(&ctx, pixels, TIO_GFX_FMT_RGBA8, TIO_GFX_FULL, out_buf, out_cap);
 
         timer_start(&t);
-        tio_write(&tio, ctx.data, ctx.data_size);
+        tio_write(&tio, out_buf, (size_t)n);
         total_write_ms += timer_elapsed_ms(&t);
 
-        printf("\x1b[H\r\nframe %d  size=%zu bytes\r\n", frame, ctx.data_size);
+        printf("\x1b[H\r\nframe %d  size=%d bytes\r\n", frame, n);
         fflush(stdout);
     }
     printf("\r\n1000 frames in %.1f ms  [%s  ux=%d uy=%d]\r\n", timer_elapsed_ms(&wall),
@@ -104,6 +106,7 @@ int main(int argc, char** argv) {
            total_fill_ms / 1000.0, ctx.total_generate_ms / 1000.0, total_write_ms / 1000.0,
            (total_fill_ms + ctx.total_generate_ms + total_write_ms) / 1000.0);
     printf("Screen Size: %d rows, %d cols, %d pixels\r\n", term_rows, term_cols, term_rows * term_cols);
+    free(out_buf);
     free(pixels);
     tio_gfx_halfblock_destroy(&ctx);
     printf("\x1b[?25h\r\n");

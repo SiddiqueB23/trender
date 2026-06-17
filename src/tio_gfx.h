@@ -60,20 +60,6 @@ typedef struct {
 } tio_gfx_ctx;
 
 /* ── Field accessors ─────────────────────────────────────────────────────── */
-static inline char* tio_gfx_data(const tio_gfx_ctx* c) {
-    if (c->backend == TIO_GFX_BACKEND_SIXEL)           return c->impl.sixel.data;
-    else if (c->backend == TIO_GFX_BACKEND_HALFBLOCK)  return c->impl.halfblock.data;
-    else if (c->backend == TIO_GFX_BACKEND_ITERM)      return c->impl.iterm.data;
-    else if (c->backend == TIO_GFX_BACKEND_KITTY)      return c->impl.kitty.data;
-    else { fprintf(stderr, "tio_gfx_data: unknown backend %d\n", (int)c->backend); abort(); }
-}
-static inline size_t tio_gfx_data_size(const tio_gfx_ctx* c) {
-    if (c->backend == TIO_GFX_BACKEND_SIXEL)           return c->impl.sixel.data_size;
-    else if (c->backend == TIO_GFX_BACKEND_HALFBLOCK)  return c->impl.halfblock.data_size;
-    else if (c->backend == TIO_GFX_BACKEND_ITERM)      return c->impl.iterm.data_size;
-    else if (c->backend == TIO_GFX_BACKEND_KITTY)      return c->impl.kitty.data_size;
-    else { fprintf(stderr, "tio_gfx_data_size: unknown backend %d\n", (int)c->backend); abort(); }
-}
 static inline double tio_gfx_total_ms(const tio_gfx_ctx* c) {
     if (c->backend == TIO_GFX_BACKEND_SIXEL)           return c->impl.sixel.total_generate_ms;
     else if (c->backend == TIO_GFX_BACKEND_HALFBLOCK)  return c->impl.halfblock.total_generate_ms;
@@ -96,37 +82,6 @@ static inline void tio_gfx_init(tio_gfx_ctx* ctx, tio_gfx_params params) {
     else { fprintf(stderr, "tio_gfx_init: unknown backend %d\n", (int)params.backend); abort(); }
 }
 
-static inline void tio_gfx_init_shared(tio_gfx_ctx* ctxs, int n,
-                                        tio_gfx_params params) {
-    if (params.backend == TIO_GFX_BACKEND_SIXEL) {
-        for (int i = 0; i < n; i++) {
-            ctxs[i].backend = TIO_GFX_BACKEND_SIXEL;
-            tio_gfx_sixel_init(&ctxs[i].impl.sixel, params.p.sixel);
-        }
-        for (int i = 1; i < n; i++)
-            tio_gfx_sixel_use_scratch_of(&ctxs[i].impl.sixel, &ctxs[0].impl.sixel);
-    } else if (params.backend == TIO_GFX_BACKEND_HALFBLOCK) {
-        for (int i = 0; i < n; i++) {
-            ctxs[i].backend = TIO_GFX_BACKEND_HALFBLOCK;
-            tio_gfx_halfblock_init(&ctxs[i].impl.halfblock, params.p.halfblock);
-        }
-    } else if (params.backend == TIO_GFX_BACKEND_ITERM) {
-        for (int i = 0; i < n; i++) {
-            ctxs[i].backend = TIO_GFX_BACKEND_ITERM;
-            tio_gfx_iterm_init(&ctxs[i].impl.iterm, params.p.iterm);
-        }
-        for (int i = 1; i < n; i++)
-            tio_gfx_iterm_use_scratch_of(&ctxs[i].impl.iterm, &ctxs[0].impl.iterm);
-    } else if (params.backend == TIO_GFX_BACKEND_KITTY) {
-        for (int i = 0; i < n; i++) {
-            ctxs[i].backend = TIO_GFX_BACKEND_KITTY;
-            tio_gfx_kitty_init(&ctxs[i].impl.kitty, params.p.kitty);
-        }
-        for (int i = 1; i < n; i++)
-            tio_gfx_kitty_use_scratch_of(&ctxs[i].impl.kitty, &ctxs[0].impl.kitty);
-    } else { fprintf(stderr, "tio_gfx_init_shared: unknown backend %d\n", (int)params.backend); abort(); }
-}
-
 static inline void tio_gfx_destroy(tio_gfx_ctx* ctx) {
     if (ctx->backend == TIO_GFX_BACKEND_SIXEL)
         tio_gfx_sixel_destroy(&ctx->impl.sixel);
@@ -137,11 +92,6 @@ static inline void tio_gfx_destroy(tio_gfx_ctx* ctx) {
     else if (ctx->backend == TIO_GFX_BACKEND_KITTY)
         tio_gfx_kitty_destroy(&ctx->impl.kitty);
     else { fprintf(stderr, "tio_gfx_destroy: unknown backend %d\n", (int)ctx->backend); abort(); }
-}
-
-static inline void tio_gfx_destroy_shared(tio_gfx_ctx* ctxs, int n) {
-    for (int i = 0; i < n; i++)
-        tio_gfx_destroy(&ctxs[i]);
 }
 
 /* ── set_params ──────────────────────────────────────────────────────────── */
@@ -158,17 +108,30 @@ static inline void tio_gfx_set_params(tio_gfx_ctx* ctx, tio_gfx_params params) {
 }
 
 /* ── Generate ────────────────────────────────────────────────────────────── */
-static inline void tio_gfx_generate(tio_gfx_ctx* ctx, const void* pixels,
-                                     tio_gfx_pixel_fmt fmt, int parts) {
+static inline int tio_gfx_generate(tio_gfx_ctx* ctx, const void* pixels,
+                                    tio_gfx_pixel_fmt fmt, int parts,
+                                    char* out_buf, size_t out_cap) {
     if (ctx->backend == TIO_GFX_BACKEND_SIXEL)
-        tio_gfx_sixel_generate(&ctx->impl.sixel, pixels, fmt, parts);
+        return tio_gfx_sixel_generate(&ctx->impl.sixel, pixels, fmt, parts, out_buf, out_cap);
     else if (ctx->backend == TIO_GFX_BACKEND_HALFBLOCK)
-        tio_gfx_halfblock_generate(&ctx->impl.halfblock, pixels, fmt, parts);
+        return tio_gfx_halfblock_generate(&ctx->impl.halfblock, pixels, fmt, parts, out_buf, out_cap);
     else if (ctx->backend == TIO_GFX_BACKEND_ITERM)
-        tio_gfx_iterm_generate(&ctx->impl.iterm, pixels, fmt, parts);
+        return tio_gfx_iterm_generate(&ctx->impl.iterm, pixels, fmt, parts, out_buf, out_cap);
     else if (ctx->backend == TIO_GFX_BACKEND_KITTY)
-        tio_gfx_kitty_generate(&ctx->impl.kitty, pixels, fmt, parts);
+        return tio_gfx_kitty_generate(&ctx->impl.kitty, pixels, fmt, parts, out_buf, out_cap);
     else { fprintf(stderr, "tio_gfx_generate: unknown backend %d\n", (int)ctx->backend); abort(); }
+}
+
+static inline size_t tio_gfx_output_size_hint(tio_gfx_params params) {
+    if (params.backend == TIO_GFX_BACKEND_SIXEL)
+        return tio_gfx_sixel_output_size_hint(params.p.sixel);
+    else if (params.backend == TIO_GFX_BACKEND_HALFBLOCK)
+        return tio_gfx_halfblock_output_size_hint(params.p.halfblock);
+    else if (params.backend == TIO_GFX_BACKEND_ITERM)
+        return tio_gfx_iterm_output_size_hint(params.p.iterm);
+    else if (params.backend == TIO_GFX_BACKEND_KITTY)
+        return tio_gfx_kitty_output_size_hint(params.p.kitty);
+    else { fprintf(stderr, "tio_gfx_output_size_hint: unknown backend %d\n", (int)params.backend); abort(); }
 }
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */

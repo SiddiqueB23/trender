@@ -1,17 +1,100 @@
-#include "trender.h"
+#include "trender2.h"
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
 #include "raycast.h"
-#include "trender_input.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
+void update_matrices(mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix,
+	render_params_t* params) {
+	glm_mat4_mul(view_matrix, model_matrix, params->model_view);
+	glm_mat4_mul(projection_matrix, params->model_view, params->model_view_projection);
+	glm_mat4_pick3(params->model_view, params->normal_transform);
+	glm_mat3_inv(params->normal_transform, params->normal_transform);
+	glm_mat3_transpose(params->normal_transform);
+}
+
+float scale_x = 1.0f, scale_y = 1.0f, scale_z = 1.0f;
+float translate_x = 0.0f, translate_y = 0.0f, translate_z = 0.0f;
+float rotate_angle = 0.0;
+void update_model_matrix(mat4 model_matrix) {
+	glm_mat4_identity(model_matrix);
+	glm_scale(model_matrix, (vec3) { scale_x, scale_y, scale_z });
+	glm_rotate_y(model_matrix, glm_rad(rotate_angle), model_matrix);
+	glm_translate(model_matrix, (vec3) { translate_x, translate_y, translate_z });
+}
+
+float camera_x = 0.0f, camera_y = 0.0f, camera_z = 0.0f;
+float camera_pitch = 0.0f, camera_yaw = 0.0f;
+
+void update_view_matrix(mat4 view_matrix) {
+	glm_mat4_identity(view_matrix);
+	glm_rotate_x(view_matrix, glm_rad(camera_pitch), view_matrix);
+	glm_rotate_y(view_matrix, glm_rad(camera_yaw), view_matrix);
+	glm_translate(view_matrix, (vec3) { -camera_x, -camera_y, camera_z });
+}
+
+void first_person_camera(int event_code,
+	mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix,
+	render_params_t* render_params) {
+	(void)model_matrix; (void)projection_matrix; (void)render_params;
+	float camera_facing_x = sinf(glm_rad(camera_yaw));
+	float camera_facing_y = sinf(glm_rad(camera_pitch));
+	float camera_facing_z = cosf(glm_rad(camera_yaw));
+	float camera_right_x = sinf(glm_rad(camera_yaw - 90.0f));
+	float camera_right_y = 0.0f;
+	float camera_right_z = cosf(glm_rad(camera_yaw - 90.0f));
+
+	float camera_speed = 1.0f;
+	if (event_code == 'd') {
+		camera_x -= camera_right_x * camera_speed;
+		camera_y -= camera_right_y * camera_speed;
+		camera_z -= camera_right_z * camera_speed;
+	}
+	else if (event_code == 'a') {
+		camera_x += camera_right_x * camera_speed;
+		camera_y += camera_right_y * camera_speed;
+		camera_z += camera_right_z * camera_speed;
+	}
+	else if (event_code == 'w') {
+		camera_x += camera_facing_x * camera_speed;
+		camera_y += camera_facing_y * camera_speed;
+		camera_z += camera_facing_z * camera_speed;
+	}
+	else if (event_code == 's') {
+		camera_x -= camera_facing_x * camera_speed;
+		camera_y -= camera_facing_y * camera_speed;
+		camera_z -= camera_facing_z * camera_speed;
+	}
+	else if (event_code == 'q') {
+		camera_y += camera_speed;
+	}
+	else if (event_code == 'e') {
+		camera_y -= camera_speed;
+	}
+	else if (event_code == ARROW_LEFT) {
+		camera_yaw -= 10.0f;
+	}
+	else if (event_code == ARROW_RIGHT) {
+		camera_yaw += 10.0f;
+	}
+	else if (event_code == ARROW_UP) {
+		camera_pitch -= 10.0f;
+		glm_clamp(camera_pitch, -45.0f, 45.0f);
+	}
+	else if (event_code == ARROW_DOWN) {
+		camera_pitch += 10.0f;
+		glm_clamp(camera_pitch, -45.0f, 45.0f);
+	}
+	update_view_matrix(view_matrix);
+}
+
 tio_ctx_t tio_ctx;
 
-int keep_running = 1;
-omp_lock_t input_state_lock;
-render_params_t render_params_global;
+void cleanup(void) {
+	tio_destroy(&tio_ctx);
+}
 
 int mousex = 0, mousey = 0;
 
@@ -126,8 +209,63 @@ int compute_display_size(cli_args_t* args, int* out_rows, int* out_cols) {
 	return 0;
 }
 
-void cleanup(void) {
-	tio_destroy(&tio_ctx);
+int keep_running = 1;
+render_params_t render_params;
+
+void handle_input(cli_args_t args,
+	mat4 model_matrix, mat4 view_matrix, mat4 projection_matrix) {
+	if (args.interactive) {
+		int current_event_queue_bytes_size = tio_get_event_queue_byte_size(&tio_ctx);
+		int event_bytes_processed = 0;
+		while (event_bytes_processed < current_event_queue_bytes_size) {
+			tio_input_event event = TIO_INPUT_EVENT_INITIALIZER;
+			int bytes_processed = tio_pop_event_queue(&tio_ctx, &event);
+			event_bytes_processed += bytes_processed;
+			if (event.type == TIO_INPUT_EVENT_TYPE_KEY) {
+				if (event.code == UPPERCASE_Q || event.code == CTRL_Q) {
+					keep_running = 0;
+					break;
+				}
+				switch (event.code) {
+				case 'w':
+				case 'a':
+				case 's':
+				case 'd':
+				case 'q':
+				case 'e':
+				case ARROW_UP:
+				case ARROW_DOWN:
+				case ARROW_RIGHT:
+				case ARROW_LEFT:
+					first_person_camera(event.code, model_matrix, view_matrix, projection_matrix, &render_params);
+					break;
+				}
+			}
+			// else if (event.type == TIO_INPUT_EVENT_TYPE_MOUSE) {
+			// 	mousex = 10 * event.position_x;
+			// 	mousey = 20 * event.position_y;
+			// 	mousex = clamp_int(mousex, 0, cols - 1);
+			// 	mousey = clamp_int(mousey, 0, rows - 1);
+			// 	if (event.code == LMB_DOWN) {
+			// 		hit_triangle_idx = ray_cast(&mesh, render_params.model_view, mousex, mousey, cols, rows);
+			// 		if (hit_triangle_idx == -1) {
+			// 			mesh.start_triangle_index = 0;
+			// 			mesh.end_triangle_index = mesh.attrib.num_face_num_verts;
+			// 		}
+			// 		else {
+			// 			mesh.start_triangle_index = hit_triangle_idx;
+			// 			mesh.end_triangle_index = hit_triangle_idx + 1;
+			// 		}
+			// 	}
+			// }
+		}
+	}
+	if (args.rotate) {
+		rotate_angle += 1.0f;
+	}
+	update_model_matrix(model_matrix);
+
+	update_matrices(model_matrix, view_matrix, projection_matrix, &render_params);
 }
 
 int main(int argc, char* argv[]) {
@@ -152,9 +290,7 @@ int main(int argc, char* argv[]) {
 	if (args.verbose) {
 		print_material_info(mesh.materials, mesh.num_materials);
 	}
-
-	input_state_t input_state = INPUT_STATE_INITIALIZER;
-
+	
 	if (args.center || args.autofit) {
 		float minx, miny, minz, maxx, maxy, maxz;
 		get_bounding_box(&mesh, &minx, &miny, &minz, &maxx, &maxy, &maxz);
@@ -163,20 +299,20 @@ int main(int argc, char* argv[]) {
 			printf("  Min: (%.2f, %.2f, %.2f)\r\n", minx, miny, minz);
 			printf("  Max: (%.2f, %.2f, %.2f)\r\n", maxx, maxy, maxz);
 		}
-		input_state.translate_x = -(minx + maxx) / 2.0f;
-		input_state.translate_y = -(miny + maxy) / 2.0f;
-		input_state.translate_z = -(minz + maxz) / 2.0f;
+		translate_x = -(minx + maxx) / 2.0f;
+		translate_y = -(miny + maxy) / 2.0f;
+		translate_z = -(minz + maxz) / 2.0f;
 		if (args.autofit) {
 			float largest_extent = fabsf(max_float(max_float((float)(maxx - minx), (float)(maxy - miny)), (float)(maxz - minz)));
 			if (largest_extent < 1e-6f) largest_extent = 1.0f;
-			input_state.scale_x = 2.0f / largest_extent;
-			input_state.scale_y = 2.0f / largest_extent;
-			input_state.scale_z = 2.0f / largest_extent;
-			float sx = (maxx - minx) * input_state.scale_x;
-			float sy = (maxy - miny) * input_state.scale_y;
-			float sz = (maxz - minz) * input_state.scale_z;
+			scale_x = 2.0f / largest_extent;
+			scale_y = 2.0f / largest_extent;
+			scale_z = 2.0f / largest_extent;
+			float sx = (maxx - minx) * scale_x;
+			float sy = (maxy - miny) * scale_y;
+			float sz = (maxz - minz) * scale_z;
 			float half_max = 0.5f * max_float(max_float(sx, sy), sz);
-			input_state.camera_z = -(half_max / tanf(glm_rad(45.0f)) + sz * 0.5f + near_plane);
+			camera_z = -(half_max / tanf(glm_rad(45.0f)) + sz * 0.5f + near_plane);
 		}
 	}
 	
@@ -196,8 +332,13 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
-	init_input(&input_state, &tio_ctx, args.interactive, args.rotate, cols, rows);
-	render_params_copy(&render_params_global, &input_state.render_params);
+	mat4 model_matrix, view_matrix, projection_matrix;
+	glm_mat4_identity(projection_matrix);
+	glm_perspective(glm_rad(90.0f), (float)cols / (float)rows, near_plane, far_plane, projection_matrix);
+	
+	update_model_matrix(model_matrix);
+	update_view_matrix(view_matrix);
+	update_matrices(model_matrix, view_matrix, projection_matrix, &render_params);
 
 	if (args.interactive) {
 		printf("\x1b[2J");   // Clear screen
@@ -210,101 +351,58 @@ int main(int argc, char* argv[]) {
 	if (trender_ctx_init(&ctx, rows, cols, &args) != 0)
 		return 1;
 	
-	omp_init_lock(&input_state_lock);
 
 	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
 	
 	double total_processing_time = 0.0;
-	double processing_time = 0.0;
 	double previous_end_time = timer_elapsed_ms(&timer_whole);
 	double frame_time = 0.0;
 	double total_frame_time = 0.0;
 	double current_end_time = 0.0;
-	
-	// int hit_triangle_idx = -1;
-	
-#pragma omp parallel num_threads(args.threads) default(shared)
-	{
-		int thread_id = omp_get_thread_num();
-		int num_frame_counter = args.frames;
-		int thread_keeps_running = 1;
-		if (ctx.num_threads == 1) {
-			render_params_copy(&ctx.render_ctx[0].params, &render_params_global);
-		}else if(thread_id >= 1){
-			render_params_copy(&ctx.render_ctx[thread_id - 1].params, &render_params_global);
+
+	monotonic_timer_t display_timer;
+	double total_display_times[16];
+	for(int i = 0; i < 16; i++) total_display_times[i] = 0.0;
+
+	for(int i=0;i<ctx.num_threads;i++) {
+		render_params_copy(&ctx.render_ctx[i].params, &render_params);
+		trender_generate_frame(&ctx, &mesh, i);
+	}
+
+	volatile int current_frame = 0;
+	omp_lock_t current_frame_lock;
+	omp_init_lock(&current_frame_lock);
+
+#pragma omp parallel for ordered schedule(static, 1) num_threads(args.threads)
+    for (int frame_thread_id = 0; frame_thread_id < args.threads * args.frames; frame_thread_id++) {
+        int thread_id = frame_thread_id % args.threads;
+        int frame = frame_thread_id / args.threads;
+		if (keep_running == 0) {
+			continue;
 		}
-		trender_generate_frame(&ctx, &mesh, thread_id, 0);
-#pragma omp barrier
-		if (ctx.num_threads >= 2 && thread_id == 0) {
-			for (int i = 0; i < ctx.num_threads - 1; i++) {
-				set_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), thread_id, ctx.front[i], i);
-			}
-		}
-#pragma omp barrier
-		while (num_frame_counter--) {
-			if(thread_id == 0){
-				handle_input(&input_state);
-				thread_keeps_running = !input_state.quit_requested;
-
-				omp_set_lock(&input_state_lock);
-				render_params_copy(&render_params_global, &input_state.render_params);
-				keep_running = thread_keeps_running;
-				omp_unset_lock(&input_state_lock);
-			}
-			
-			if (ctx.num_threads == 1) {
-				render_params_copy(&ctx.render_ctx[0].params, &render_params_global);
-			}else if(thread_id >= 1){
-				omp_set_lock(&input_state_lock);
-				thread_keeps_running = keep_running;
-				render_params_copy(&ctx.render_ctx[thread_id - 1].params, &render_params_global);
-				omp_unset_lock(&input_state_lock);
-			}
-
-			if (thread_keeps_running == 0) {
-				break;
-			}
-
-			trender_generate_frame(&ctx, &mesh, thread_id, 1);
-			if (thread_id == 0) {
-				trender_display_frame(&ctx, &tio_ctx);
-
+		trender_generate_frame(&ctx, &mesh, thread_id);
+		// printf("\033[31mThread %d finished generating frame %d\033[0m\r\n", thread_id, frame);
+#pragma omp ordered
+		{
+			timer_start(&display_timer);
+			tio_write(&tio_ctx, ctx.gfx_out[thread_id], ctx.gfx_out_size[thread_id]);
+			// if(thread_id==0)printf("\r\nFrame: %2d\r\n", frame);
+			// printf("\033[33mThread %d displaying frame %d\033[0m\r\n", thread_id, frame);	
+			double display_time = timer_elapsed_ms(&display_timer);
+			total_display_times[thread_id] += display_time;
+			if (thread_id == 0) {						
+				handle_input(args, model_matrix, view_matrix, projection_matrix);
 				current_end_time = timer_elapsed_ms(&timer_whole);
 				frame_time = current_end_time - previous_end_time;
 				previous_end_time = current_end_time;
 				total_frame_time += frame_time;
-
-				processing_time = fmaxf(0.0f, frame_time - ctx.display_time);
-				total_processing_time += processing_time;
-
-				if (args.interactive) {
-					printf("\x1b[H");    // Move cursor to home
-					printf("\r\n");
-					printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
-					printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", input_state.camera_x, input_state.camera_y, input_state.camera_z);
-					printf("Processing:    %0.2f                              \r\n", processing_time);
-					printf("Display:       %0.2f                              \r\n", ctx.display_time);
-					printf("Frame time:    %0.2f                              \r\n", frame_time);
-					fflush(stdout);
-				}
 			}
-		}
-		if (thread_id == 0) {
-			if (ctx.num_threads == 2) {
-				unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[0], 0), 0, ctx.front[0], 0);
-			}
-			else if (ctx.num_threads >= 3) {
-				for (int i = 0; i < ctx.num_threads - 1; i++) {
-					unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), 0, ctx.front[i], i);
-				}
-			}
-		}
-
-		if (ctx.num_threads >= 2 && thread_id >= 1) {
-			unset_lock_with_debug(buffer_lock_at(&ctx, ctx.back[thread_id - 1], thread_id - 1), thread_id, ctx.back[thread_id - 1], thread_id - 1);
-		}
+			render_params_copy(&ctx.render_ctx[thread_id].params, &render_params);
+		}	
+		// printf("\033[32mThread %d finished displaying frame %d\033[0m\r\n", thread_id, frame);	
 	}
+	
 
 	/* Move cursor below the rendered image so the shell prompt appears cleanly */
 	int cursor_row;
@@ -329,14 +427,27 @@ int main(int argc, char* argv[]) {
 		printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
 		printf("Total times:        \r\n");
 		printf("Processing:    %0.2f\r\n", total_processing_time);
-		printf("Display:       %0.2f\r\n", ctx.total_display_time);
 		printf("Frame time:    %0.2f\r\n", total_frame_time);
 		printf("Average times:      \r\n");
 		printf("Processing:    %0.2f\r\n", total_processing_time / (float)args.frames);
-		printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)args.frames);
 		printf("Frame time:    %0.2f\r\n", total_frame_time / (float)args.frames);
 		double whole_time = timer_elapsed_ms(&timer_whole);
 		trender_print_stats(&ctx, args.frames);
+
+		double total_display_time = 0.0;
+		printf("Per-thread display totals (ms):\r\n");
+		printf("  Thread  %-12s\r\n", "Display");
+		for (int i = 0; i < args.threads; i++) {
+			printf("  %-7d %-12.2f\r\n", i + 1, total_display_times[i]);
+			total_display_time += total_display_times[i];
+		}
+		printf("  %-7s %-12.2f\r\n", "Total", total_display_time);
+		printf("Per-thread display averages (ms/frame):\r\n");
+		printf("  Thread  %-12s\r\n", "Display");
+		for (int i = 0; i < args.threads; i++) {
+			printf("  %-7d %-12.2f\r\n", i + 1, total_display_times[i] / (float)args.frames);
+		}
+
 		printf("Total time:            %0.2f\r\n", whole_time);
 
 	}

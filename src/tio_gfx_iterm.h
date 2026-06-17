@@ -61,9 +61,6 @@ typedef struct {
 
 typedef struct {
     /* public — read after generate */
-    char*          data;
-    size_t         data_size;
-    size_t         data_cap;
     int            width, height;
 
     /* stats */
@@ -71,28 +68,25 @@ typedef struct {
 
     /* private */
     tio_gfx_iterm_params _params;
-    unsigned char* _rgb_buf;        /* intermediate w*h*3 RGB scratch (shared across buffer slots) */
+    unsigned char* _rgb_buf;        /* intermediate w*h*3 RGB scratch */
     size_t         _rgb_buf_cap;
-    char*          _encode_buf;     /* stb output before base64 (shared across buffer slots) */
+    char*          _encode_buf;     /* stb output before base64 */
     size_t         _encode_buf_cap;
-    int            _owns_scratch;   /* 1 if this ctx owns _rgb_buf/_encode_buf, 0 if borrowed */
 } tio_gfx_iterm_ctx;
 
 /* ── Declarations ────────────────────────────────────────────────────────── */
-void tio_gfx_iterm_init(tio_gfx_iterm_ctx* ctx, tio_gfx_iterm_params params);
-void tio_gfx_iterm_destroy(tio_gfx_iterm_ctx* ctx);
-void tio_gfx_iterm_init_shared(tio_gfx_iterm_ctx* ctxs, int n,
+void   tio_gfx_iterm_init(tio_gfx_iterm_ctx* ctx, tio_gfx_iterm_params params);
+void   tio_gfx_iterm_destroy(tio_gfx_iterm_ctx* ctx);
+void   tio_gfx_iterm_set_params(tio_gfx_iterm_ctx* ctx,
                                  tio_gfx_iterm_params params);
-void tio_gfx_iterm_destroy_shared(tio_gfx_iterm_ctx* ctxs, int n);
-void tio_gfx_iterm_set_params(tio_gfx_iterm_ctx* ctx,
-                                tio_gfx_iterm_params params);
-void tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
-                              const void* pixels,
-                              tio_gfx_pixel_fmt fmt,
-                              int parts);
-void tio_gfx_iterm_use_scratch_of(tio_gfx_iterm_ctx* dst, tio_gfx_iterm_ctx* src);
-void tio_gfx_iterm_reset_stats(tio_gfx_iterm_ctx* ctx);
-void tio_gfx_iterm_print_stats(const tio_gfx_iterm_ctx* ctx);
+int    tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
+                               const void* pixels,
+                               tio_gfx_pixel_fmt fmt,
+                               int parts,
+                               char* out_buf, size_t out_cap);
+size_t tio_gfx_iterm_output_size_hint(tio_gfx_iterm_params params);
+void   tio_gfx_iterm_reset_stats(tio_gfx_iterm_ctx* ctx);
+void   tio_gfx_iterm_print_stats(const tio_gfx_iterm_ctx* ctx);
 
 /* ═══════════════════════════════════════════════════════════════════════════
    IMPLEMENTATION — define TIO_GFX_ITERM_IMPLEMENTATION in exactly one TU
@@ -206,91 +200,44 @@ void tio_gfx_iterm_init(tio_gfx_iterm_ctx* ctx, tio_gfx_iterm_params params) {
     ctx->_params           = params;
     ctx->width             = params.width;
     ctx->height            = params.height;
-    ctx->data_cap          = tio_gfx__iterm_buf_cap(params.width, params.height);
-    ctx->data              = (char*)TIO_GFX_MALLOC(ctx->data_cap);
-    ctx->data_size         = 0;
     ctx->total_generate_ms = 0.0;
     ctx->_encode_buf_cap   = tio_gfx__iterm_encode_buf_cap(params.width, params.height);
     ctx->_encode_buf       = (char*)TIO_GFX_MALLOC(ctx->_encode_buf_cap);
     ctx->_rgb_buf_cap      = (size_t)params.width * params.height * 3;
     ctx->_rgb_buf          = (unsigned char*)TIO_GFX_MALLOC(ctx->_rgb_buf_cap);
-    ctx->_owns_scratch     = 1;
     stbi_write_png_compression_level = params.png_compression_level;
 }
 
 void tio_gfx_iterm_destroy(tio_gfx_iterm_ctx* ctx) {
-    TIO_GFX_FREE(ctx->data);
-    if (ctx->_owns_scratch) {
-        TIO_GFX_FREE(ctx->_encode_buf);
-        TIO_GFX_FREE(ctx->_rgb_buf);
-    }
-    ctx->data            = NULL;
+    TIO_GFX_FREE(ctx->_encode_buf);
+    TIO_GFX_FREE(ctx->_rgb_buf);
     ctx->_encode_buf     = NULL;
     ctx->_rgb_buf        = NULL;
-    ctx->data_cap        = 0;
-    ctx->data_size       = 0;
     ctx->_encode_buf_cap = 0;
     ctx->_rgb_buf_cap    = 0;
 }
 
-void tio_gfx_iterm_use_scratch_of(tio_gfx_iterm_ctx* dst,
-                                    tio_gfx_iterm_ctx* src) {
-    if (dst->_owns_scratch) {
-        TIO_GFX_FREE(dst->_rgb_buf);
-        TIO_GFX_FREE(dst->_encode_buf);
-    }
-    dst->_rgb_buf        = src->_rgb_buf;
-    dst->_rgb_buf_cap    = src->_rgb_buf_cap;
-    dst->_encode_buf     = src->_encode_buf;
-    dst->_encode_buf_cap = src->_encode_buf_cap;
-    dst->_owns_scratch   = 0;
-}
-
-void tio_gfx_iterm_init_shared(tio_gfx_iterm_ctx* ctxs, int n,
-                                 tio_gfx_iterm_params params) {
-    for (int i = 0; i < n; i++) tio_gfx_iterm_init(&ctxs[i], params);
-    for (int i = 1; i < n; i++) tio_gfx_iterm_use_scratch_of(&ctxs[i], &ctxs[0]);
-}
-
-void tio_gfx_iterm_destroy_shared(tio_gfx_iterm_ctx* ctxs, int n) {
-    for (int i = 0; i < n; i++) tio_gfx_iterm_destroy(&ctxs[i]);
-}
-
 void tio_gfx_iterm_set_params(tio_gfx_iterm_ctx* ctx,
                                 tio_gfx_iterm_params params) {
-    size_t new_data_cap   = tio_gfx__iterm_buf_cap(params.width, params.height);
-    size_t new_encode_cap = tio_gfx__iterm_encode_buf_cap(params.width, params.height);
-    size_t new_rgb_cap    = (size_t)params.width * params.height * 3;
-    if (new_data_cap > ctx->data_cap) {
-        TIO_GFX_FREE(ctx->data);
-        ctx->data_cap  = new_data_cap;
-        ctx->data      = (char*)TIO_GFX_MALLOC(new_data_cap);
-        ctx->data_size = 0;
-    }
-    if (new_encode_cap > ctx->_encode_buf_cap) {
-        TIO_GFX_FREE(ctx->_encode_buf);
-        ctx->_encode_buf_cap = new_encode_cap;
-        ctx->_encode_buf     = (char*)TIO_GFX_MALLOC(new_encode_cap);
-    }
-    if (new_rgb_cap > ctx->_rgb_buf_cap) {
-        TIO_GFX_FREE(ctx->_rgb_buf);
-        ctx->_rgb_buf_cap = new_rgb_cap;
-        ctx->_rgb_buf     = (unsigned char*)TIO_GFX_MALLOC(new_rgb_cap);
-    }
     ctx->_params = params;
     ctx->width   = params.width;
     ctx->height  = params.height;
     stbi_write_png_compression_level = params.png_compression_level;
 }
 
+size_t tio_gfx_iterm_output_size_hint(tio_gfx_iterm_params params) {
+    return tio_gfx__iterm_buf_cap(params.width, params.height);
+}
+
 /* ── Generate ────────────────────────────────────────────────────────────── */
-void tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
-                              const void* pixels,
-                              tio_gfx_pixel_fmt fmt,
-                              int parts) {
-    (void)parts; /* always emit a complete independent image with cursor reposition */
+int tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
+                             const void* pixels,
+                             tio_gfx_pixel_fmt fmt,
+                             int parts,
+                             char* out_buf, size_t out_cap) {
+    (void)parts; (void)out_cap;
     monotonic_timer_t _t; timer_start(&_t);
-    char* p = ctx->data;
+    char* p = out_buf;
     const int w  = ctx->_params.width;
     const int h  = ctx->_params.height;
     const int ux = ctx->_params.upscale_x > 1 ? ctx->_params.upscale_x : 1;
@@ -335,8 +282,8 @@ void tio_gfx_iterm_generate(tio_gfx_iterm_ctx* ctx,
     /* BEL terminator */
     *p++ = '\a';
 
-    ctx->data_size          = (size_t)(p - ctx->data);
     ctx->total_generate_ms += timer_elapsed_ms(&_t);
+    return (int)(p - out_buf);
 }
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */
@@ -346,8 +293,8 @@ void tio_gfx_iterm_reset_stats(tio_gfx_iterm_ctx* ctx) {
 
 void tio_gfx_iterm_print_stats(const tio_gfx_iterm_ctx* ctx) {
     fprintf(stderr,
-            "[tio_gfx_iterm] generate total: %.2f ms | last output: %zu bytes\n",
-            ctx->total_generate_ms, ctx->data_size);
+            "[tio_gfx_iterm] generate total: %.2f ms\n",
+            ctx->total_generate_ms);
 }
 
 #endif /* TIO_GFX_ITERM_IMPLEMENTATION */

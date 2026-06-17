@@ -56,9 +56,6 @@ typedef struct {
 
 typedef struct {
     /* public — read after generate */
-    char*   data;
-    size_t  data_size;
-    size_t  data_cap;
     int     width, height;
 
     /* stats */
@@ -69,26 +66,21 @@ typedef struct {
     unsigned char*         _index_data;         /* width*6 bytes, one band scratch */
     int*                   _scratch_painted;    /* width ints                     */
     uint64_t*              _scratch_transposed; /* width uint64s                  */
-    int                    _owns_scratch;       /* 1 = this ctx frees on destroy  */
 } tio_gfx_sixel_ctx;
 
 /* ── Declarations ────────────────────────────────────────────────────────── */
-void tio_gfx_sixel_init(tio_gfx_sixel_ctx* ctx, tio_gfx_sixel_params params);
-void tio_gfx_sixel_destroy(tio_gfx_sixel_ctx* ctx);
-void tio_gfx_sixel_init_shared(tio_gfx_sixel_ctx* ctxs, int n,
-                                tio_gfx_sixel_params params);
-void tio_gfx_sixel_destroy_shared(tio_gfx_sixel_ctx* ctxs, int n);
-void tio_gfx_sixel_set_params(tio_gfx_sixel_ctx* ctx,
-                               tio_gfx_sixel_params params);
-void tio_gfx_sixel_generate(tio_gfx_sixel_ctx* ctx,
-                             const void* pixels,
-                             tio_gfx_pixel_fmt fmt,
-                             int parts);
-void tio_gfx_sixel_reset_stats(tio_gfx_sixel_ctx* ctx);
-void tio_gfx_sixel_print_stats(const tio_gfx_sixel_ctx* ctx);
-void tio_gfx_sixel_init_scratch(tio_gfx_sixel_ctx* ctx);
-void tio_gfx_sixel_use_scratch_of(tio_gfx_sixel_ctx* ctx,
-                                   const tio_gfx_sixel_ctx* src);
+void   tio_gfx_sixel_init(tio_gfx_sixel_ctx* ctx, tio_gfx_sixel_params params);
+void   tio_gfx_sixel_destroy(tio_gfx_sixel_ctx* ctx);
+void   tio_gfx_sixel_set_params(tio_gfx_sixel_ctx* ctx,
+                                 tio_gfx_sixel_params params);
+int    tio_gfx_sixel_generate(tio_gfx_sixel_ctx* ctx,
+                               const void* pixels,
+                               tio_gfx_pixel_fmt fmt,
+                               int parts,
+                               char* out_buf, size_t out_cap);
+size_t tio_gfx_sixel_output_size_hint(tio_gfx_sixel_params params);
+void   tio_gfx_sixel_reset_stats(tio_gfx_sixel_ctx* ctx);
+void   tio_gfx_sixel_print_stats(const tio_gfx_sixel_ctx* ctx);
 
 /* ═══════════════════════════════════════════════════════════════════════════
    IMPLEMENTATION — define TIO_GFX_SIXEL_IMPLEMENTATION in exactly one TU
@@ -229,85 +221,23 @@ void tio_gfx_sixel_init(tio_gfx_sixel_ctx* ctx, tio_gfx_sixel_params params) {
     ctx->_params           = params;
     ctx->width             = params.width;
     ctx->height            = params.height;
-    ctx->data_cap          = tio_gfx__sixel_buf_cap(params.width, params.height,
-                                                     params.scale_y);
-    ctx->data              = (char*)TIO_GFX_MALLOC(ctx->data_cap);
-    ctx->data_size         = 0;
     ctx->total_generate_ms = 0.0;
-    ctx->_owns_scratch     = 1;
     tio_gfx__sixel_alloc_scratch(ctx, &params);
 }
 
 void tio_gfx_sixel_destroy(tio_gfx_sixel_ctx* ctx) {
-    TIO_GFX_FREE(ctx->data);
-    ctx->data      = NULL;
-    ctx->data_cap  = 0;
-    ctx->data_size = 0;
-    if (ctx->_owns_scratch) {
-        tio_gfx__sixel_free_scratch(ctx);
-    } else {
-        ctx->_index_data         = NULL;
-        ctx->_scratch_painted    = NULL;
-        ctx->_scratch_transposed = NULL;
-    }
-}
-
-void tio_gfx_sixel_init_scratch(tio_gfx_sixel_ctx* ctx) {
-    if (ctx->_owns_scratch) tio_gfx__sixel_free_scratch(ctx);
-    tio_gfx__sixel_alloc_scratch(ctx, &ctx->_params);
-    ctx->_owns_scratch = 1;
-}
-
-void tio_gfx_sixel_use_scratch_of(tio_gfx_sixel_ctx* ctx,
-                                   const tio_gfx_sixel_ctx* src) {
-    if (ctx->_owns_scratch) tio_gfx__sixel_free_scratch(ctx);
-    ctx->_index_data         = src->_index_data;
-    ctx->_scratch_painted    = src->_scratch_painted;
-    ctx->_scratch_transposed = src->_scratch_transposed;
-    ctx->_owns_scratch       = 0;
-}
-
-void tio_gfx_sixel_init_shared(tio_gfx_sixel_ctx* ctxs, int n,
-                                tio_gfx_sixel_params params) {
-    tio_gfx_sixel_init(&ctxs[0], params);
-    for (int i = 1; i < n; i++) {
-        tio_gfx_sixel_init(&ctxs[i], params);
-        tio_gfx_sixel_use_scratch_of(&ctxs[i], &ctxs[0]);
-    }
-}
-
-void tio_gfx_sixel_destroy_shared(tio_gfx_sixel_ctx* ctxs, int n) {
-    for (int i = 0; i < n; i++)
-        tio_gfx_sixel_destroy(&ctxs[i]);
+    tio_gfx__sixel_free_scratch(ctx);
 }
 
 void tio_gfx_sixel_set_params(tio_gfx_sixel_ctx* ctx,
                                tio_gfx_sixel_params params) {
-    size_t new_cap = tio_gfx__sixel_buf_cap(params.width, params.height,
-                                             params.scale_y);
-    if (new_cap > ctx->data_cap) {
-        TIO_GFX_FREE(ctx->data);
-        ctx->data_cap  = new_cap;
-        ctx->data      = (char*)TIO_GFX_MALLOC(new_cap);
-        ctx->data_size = 0;
-    }
-
-    if (ctx->_owns_scratch) {
-        size_t new_index  = (size_t)(params.width * 6);
-        size_t new_paint  = (size_t)params.width * sizeof(int);
-        size_t new_trans  = (size_t)params.width * sizeof(uint64_t);
-        size_t old_index  = (size_t)(ctx->_params.width * 6);
-        size_t old_paint  = (size_t)ctx->_params.width * sizeof(int);
-        size_t old_trans  = (size_t)ctx->_params.width * sizeof(uint64_t);
-        if (new_index > old_index || new_paint > old_paint || new_trans > old_trans) {
-            tio_gfx__sixel_free_scratch(ctx);
-            tio_gfx__sixel_alloc_scratch(ctx, &params);
-        }
-    }
-
     ctx->_params = params;
     ctx->width   = params.width;
     ctx->height  = params.height;
+}
+
+size_t tio_gfx_sixel_output_size_hint(tio_gfx_sixel_params params) {
+    return tio_gfx__sixel_buf_cap(params.width, params.height, params.scale_y);
 }
 
 /* ── Quantization ────────────────────────────────────────────────────────── */
@@ -592,12 +522,14 @@ static inline char* tio_gfx__encode_row(tio_gfx_sixel_ctx* ctx,
 }
 
 /* ── Generate ────────────────────────────────────────────────────────────── */
-void tio_gfx_sixel_generate(tio_gfx_sixel_ctx* ctx,
-                             const void* pixels,
-                             tio_gfx_pixel_fmt fmt,
-                             int parts) {
+int tio_gfx_sixel_generate(tio_gfx_sixel_ctx* ctx,
+                            const void* pixels,
+                            tio_gfx_pixel_fmt fmt,
+                            int parts,
+                            char* out_buf, size_t out_cap) {
     monotonic_timer_t _t; timer_start(&_t);
-    char* p = ctx->data;
+    char* p = out_buf;
+    (void)out_cap;
 
     if (parts & TIO_GFX_HEADER) {
         memcpy(p, "\x1b[H", 3); p += 3;
@@ -632,8 +564,8 @@ void tio_gfx_sixel_generate(tio_gfx_sixel_ctx* ctx,
         *p = '\0';
     }
 
-    ctx->data_size          = (size_t)(p - ctx->data);
     ctx->total_generate_ms += timer_elapsed_ms(&_t);
+    return (int)(p - out_buf);
 }
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */
@@ -643,8 +575,8 @@ void tio_gfx_sixel_reset_stats(tio_gfx_sixel_ctx* ctx) {
 
 void tio_gfx_sixel_print_stats(const tio_gfx_sixel_ctx* ctx) {
     fprintf(stderr,
-            "[tio_gfx_sixel] generate total: %.2f ms | last output: %zu bytes\n",
-            ctx->total_generate_ms, ctx->data_size);
+            "[tio_gfx_sixel] generate total: %.2f ms\n",
+            ctx->total_generate_ms);
 }
 
 #endif /* TIO_GFX_SIXEL_IMPLEMENTATION */

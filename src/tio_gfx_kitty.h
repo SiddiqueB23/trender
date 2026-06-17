@@ -37,7 +37,6 @@ typedef enum {
 typedef struct {
     int width, height;    /* encoded image pixel dimensions (= render resolution) */
     int full_height;      /* total image height across all strips (0 = use height); header strip only */
-    int starty_rows;      /* 0-based terminal row for cursor positioning; header strip only */
     int cell_height_px;   /* terminal cell height in px */
     int cell_width_px;    /* terminal cell width in px */
     int upscale_x;        /* horizontal upscale factor; c = width * upscale_x / cell_width_px */
@@ -46,14 +45,11 @@ typedef struct {
 
 #define TIO_GFX_KITTY_DEFAULT_PARAMS(w, h) \
     ((tio_gfx_kitty_params){ .width=(w), .height=(h), .full_height=0, \
-                              .starty_rows=0, .cell_height_px=1, \
-                              .cell_width_px=1, .upscale_x=1, .upscale_y=1 })
+                              .cell_height_px=1, .cell_width_px=1, \
+                              .upscale_x=1, .upscale_y=1 })
 
 typedef struct {
     /* public — read after generate */
-    char*          data;
-    size_t         data_size;
-    size_t         data_cap;
     int            width, height;
 
     /* stats */
@@ -61,26 +57,23 @@ typedef struct {
 
     /* private */
     tio_gfx_kitty_params _params;
-    unsigned char* _rgb_buf;     /* width*height*3 bytes, shared across buffer slots */
+    unsigned char* _rgb_buf;     /* width*height*3 bytes */
     size_t         _rgb_buf_cap;
-    int            _owns_scratch;
 } tio_gfx_kitty_ctx;
 
 /* ── Declarations ────────────────────────────────────────────────────────── */
-void tio_gfx_kitty_init(tio_gfx_kitty_ctx* ctx, tio_gfx_kitty_params params);
-void tio_gfx_kitty_destroy(tio_gfx_kitty_ctx* ctx);
-void tio_gfx_kitty_init_shared(tio_gfx_kitty_ctx* ctxs, int n,
+void   tio_gfx_kitty_init(tio_gfx_kitty_ctx* ctx, tio_gfx_kitty_params params);
+void   tio_gfx_kitty_destroy(tio_gfx_kitty_ctx* ctx);
+void   tio_gfx_kitty_set_params(tio_gfx_kitty_ctx* ctx,
                                  tio_gfx_kitty_params params);
-void tio_gfx_kitty_destroy_shared(tio_gfx_kitty_ctx* ctxs, int n);
-void tio_gfx_kitty_set_params(tio_gfx_kitty_ctx* ctx,
-                                tio_gfx_kitty_params params);
-void tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
-                              const void* pixels,
-                              tio_gfx_pixel_fmt fmt,
-                              int parts);
-void tio_gfx_kitty_use_scratch_of(tio_gfx_kitty_ctx* dst, tio_gfx_kitty_ctx* src);
-void tio_gfx_kitty_reset_stats(tio_gfx_kitty_ctx* ctx);
-void tio_gfx_kitty_print_stats(const tio_gfx_kitty_ctx* ctx);
+int    tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
+                               const void* pixels,
+                               tio_gfx_pixel_fmt fmt,
+                               int parts,
+                               char* out_buf, size_t out_cap);
+size_t tio_gfx_kitty_output_size_hint(tio_gfx_kitty_params params);
+void   tio_gfx_kitty_reset_stats(tio_gfx_kitty_ctx* ctx);
+void   tio_gfx_kitty_print_stats(const tio_gfx_kitty_ctx* ctx);
 
 /* ═══════════════════════════════════════════════════════════════════════════
    IMPLEMENTATION — define TIO_GFX_KITTY_IMPLEMENTATION in exactly one TU
@@ -191,71 +184,36 @@ void tio_gfx_kitty_init(tio_gfx_kitty_ctx* ctx, tio_gfx_kitty_params params) {
     ctx->_params           = params;
     ctx->width             = params.width;
     ctx->height            = params.height;
-    ctx->data_cap          = tio_gfx__kitty_buf_cap(params.width, params.height);
-    ctx->data              = (char*)TIO_GFX_MALLOC(ctx->data_cap);
-    ctx->data_size         = 0;
     ctx->total_generate_ms = 0.0;
     ctx->_rgb_buf_cap      = tio_gfx__kitty_rgb_buf_cap(params.width, params.height);
     ctx->_rgb_buf          = (unsigned char*)TIO_GFX_MALLOC(ctx->_rgb_buf_cap);
-    ctx->_owns_scratch     = 1;
 }
 
 void tio_gfx_kitty_destroy(tio_gfx_kitty_ctx* ctx) {
-    TIO_GFX_FREE(ctx->data);
-    if (ctx->_owns_scratch)
-        TIO_GFX_FREE(ctx->_rgb_buf);
-    ctx->data        = NULL;
-    ctx->_rgb_buf    = NULL;
-    ctx->data_cap    = 0;
-    ctx->data_size   = 0;
+    TIO_GFX_FREE(ctx->_rgb_buf);
+    ctx->_rgb_buf     = NULL;
     ctx->_rgb_buf_cap = 0;
-}
-
-void tio_gfx_kitty_use_scratch_of(tio_gfx_kitty_ctx* dst,
-                                    tio_gfx_kitty_ctx* src) {
-    if (dst->_owns_scratch)
-        TIO_GFX_FREE(dst->_rgb_buf);
-    dst->_rgb_buf      = src->_rgb_buf;
-    dst->_rgb_buf_cap  = src->_rgb_buf_cap;
-    dst->_owns_scratch = 0;
-}
-
-void tio_gfx_kitty_init_shared(tio_gfx_kitty_ctx* ctxs, int n,
-                                 tio_gfx_kitty_params params) {
-    for (int i = 0; i < n; i++) tio_gfx_kitty_init(&ctxs[i], params);
-    for (int i = 1; i < n; i++) tio_gfx_kitty_use_scratch_of(&ctxs[i], &ctxs[0]);
-}
-
-void tio_gfx_kitty_destroy_shared(tio_gfx_kitty_ctx* ctxs, int n) {
-    for (int i = 0; i < n; i++) tio_gfx_kitty_destroy(&ctxs[i]);
 }
 
 void tio_gfx_kitty_set_params(tio_gfx_kitty_ctx* ctx,
                                 tio_gfx_kitty_params params) {
-    size_t new_data_cap = tio_gfx__kitty_buf_cap(params.width, params.height);
-    size_t new_rgb_cap  = tio_gfx__kitty_rgb_buf_cap(params.width, params.height);
-    if (new_data_cap > ctx->data_cap) {
-        TIO_GFX_FREE(ctx->data);
-        ctx->data_cap  = new_data_cap;
-        ctx->data      = (char*)TIO_GFX_MALLOC(new_data_cap);
-        ctx->data_size = 0;
-    }
-    if (new_rgb_cap > ctx->_rgb_buf_cap) {
-        TIO_GFX_FREE(ctx->_rgb_buf);
-        ctx->_rgb_buf_cap = new_rgb_cap;
-        ctx->_rgb_buf     = (unsigned char*)TIO_GFX_MALLOC(new_rgb_cap);
-    }
     ctx->_params = params;
     ctx->width   = params.width;
     ctx->height  = params.height;
 }
 
+size_t tio_gfx_kitty_output_size_hint(tio_gfx_kitty_params params) {
+    return tio_gfx__kitty_buf_cap(params.width, params.height);
+}
+
 /* ── Generate ────────────────────────────────────────────────────────────── */
-void tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
-                              const void* pixels,
-                              tio_gfx_pixel_fmt fmt,
-                              int parts) {
+int tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
+                             const void* pixels,
+                             tio_gfx_pixel_fmt fmt,
+                             int parts,
+                             char* out_buf, size_t out_cap) {
     monotonic_timer_t _t; timer_start(&_t);
+    (void)out_cap;
 
     const int w      = ctx->_params.width;
     const int h      = ctx->_params.height;
@@ -267,13 +225,11 @@ void tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
     /* last chunk m=0 only when this strip carries the footer (terminates the image) */
     const int last_m = (parts & TIO_GFX_FOOTER) ? 0 : 1;
 
-    char* p = ctx->data;
+    char* p = out_buf;
 
     /* cursor reposition — header strip only */
     if (parts & TIO_GFX_HEADER) {
-        *p++ = '\x1b'; *p++ = '[';
-        p = tio_gfx__kitty_itoa_lt1000(p, ctx->_params.starty_rows + 1);
-        memcpy(p, ";1H", 3); p += 3;
+        memcpy(p, "\x1b[H", 3); p += 3;
     }
 
     /* convert pixels to packed RGB */
@@ -310,8 +266,8 @@ void tio_gfx_kitty_generate(tio_gfx_kitty_ctx* ctx,
         offset += chunk;
     } while (offset < rgb_total);
 
-    ctx->data_size          = (size_t)(p - ctx->data);
     ctx->total_generate_ms += timer_elapsed_ms(&_t);
+    return (int)(p - out_buf);
 }
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */
@@ -321,8 +277,8 @@ void tio_gfx_kitty_reset_stats(tio_gfx_kitty_ctx* ctx) {
 
 void tio_gfx_kitty_print_stats(const tio_gfx_kitty_ctx* ctx) {
     fprintf(stderr,
-            "[tio_gfx_kitty] generate total: %.2f ms | last output: %zu bytes\n",
-            ctx->total_generate_ms, ctx->data_size);
+            "[tio_gfx_kitty] generate total: %.2f ms\n",
+            ctx->total_generate_ms);
 }
 
 #endif /* TIO_GFX_KITTY_IMPLEMENTATION */
