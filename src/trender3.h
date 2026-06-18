@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rendering_avx2_u16_mt.h"
+#include "rendering_avx2_u16_mt2.h"
 #define TIO_GFX_USE_AVX2
 #define TIO_GFX_IMPLEMENTATION
 #include "tio_gfx.h"
@@ -21,6 +21,7 @@
 #include <stdbool.h>
 
 enum task_type {
+	PROCESS_PRIMITIVES,
     RENDER_FRAME,
     DISPLAY_FRAME,
     EXIT_LOOP,
@@ -41,6 +42,7 @@ typedef struct {
     int num_frames;
     int queue_capacity;
 
+	bool*          	primitive_chunk_procesed; /* [num_chunks] */
     /* completion state — flat [num_buffers*2 × num_chunks] */
     bool*           rendering_completed;
     bool*           display_completed;
@@ -75,13 +77,14 @@ void scheduler_ctx_init(scheduler_ctx_t* sched,
     sched->chunk_to_be_displayed  = 0;
 
     int nb2 = num_buffers * 2;
-    sched->rendering_completed     = (bool*)calloc((size_t)(nb2 * num_chunks), sizeof(bool));
-    sched->display_completed       = (bool*)calloc((size_t)(nb2 * num_chunks), sizeof(bool));
-    sched->render_params_buf       = (render_params_t*)calloc((size_t)nb2, sizeof(render_params_t));
+    sched->rendering_completed       = (bool*)calloc((size_t)(nb2 * num_chunks), sizeof(bool));
+    sched->display_completed         = (bool*)calloc((size_t)(nb2 * num_chunks), sizeof(bool));
+    sched->primitive_chunk_procesed = (bool*)calloc((size_t)(num_chunks), sizeof(bool));
+    sched->render_params_buf         = (render_params_t*)calloc((size_t)nb2, sizeof(render_params_t));
+    thread_mutex_init(&sched->state_mutex);
+	
     sched->parallel_work_queue_buf = (task_t*)malloc((size_t)queue_capacity * sizeof(task_t));
     sched->display_queue_buf       = (task_t*)malloc((size_t)queue_capacity * sizeof(task_t));
-
-    thread_mutex_init(&sched->state_mutex);
     mpmc_queue_init(&sched->parallel_work_queue, queue_capacity, sizeof(task_t), sched->parallel_work_queue_buf);
     mpmc_queue_init(&sched->display_queue,       queue_capacity, sizeof(task_t), sched->display_queue_buf);
 
@@ -129,6 +132,18 @@ void emit_exit_tasks(scheduler_ctx_t* sched) {
     mpmc_queue_produce(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 }
 
+bool frame_rasterisable(scheduler_ctx_t* sched) {
+	bool primitive_chunk_processed = true;
+	for (int i = 0; i < sched->num_chunks; i++)
+        primitive_chunk_processed  = primitive_chunk_processed  && sched->primitive_chunk_procesed[i];
+    return primitive_chunk_processed;
+}
+
+void reset_rasterisable(scheduler_ctx_t* sched) {
+	for (int i = 0; i < sched->num_chunks; i++)
+		sched->primitive_chunk_procesed[i] = false;
+}
+
 void reset_queuable(scheduler_ctx_t* sched, int frame) {
     int nb2                    = sched->num_buffers * 2;
     int frame_minus_one        = (frame + nb2 - 1) % nb2;
@@ -158,6 +173,21 @@ void run_scheduler(scheduler_ctx_t* sched, task_t completed_task) {
     int nb2    = sched->num_buffers * 2;
     int buffer = frame % nb2;
 
+	if (completed_task.type == PROCESS_PRIMITIVES) {
+		sched->primitive_chunk_procesed[chunk] = true;
+		if(frame_rasterisable(sched)) {
+			reset_rasterisable(sched);
+			for (int i = 0; i < sched->num_chunks; i++) {
+				task_t task = {
+					.type = RENDER_FRAME,
+					.frame = frame,
+					.chunk = i,
+					.render_params_ptr = NULL,
+				};
+				mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
+			}
+		}
+	}
     if (completed_task.type == RENDER_FRAME) {
         sched->rendering_completed[buffer * sched->num_chunks + chunk] = true;
         int buf_disp = sched->frame_to_be_displayed % nb2;
@@ -197,7 +227,7 @@ void run_scheduler(scheduler_ctx_t* sched, task_t completed_task) {
             } else {
                 for (int i = 0; i < sched->num_chunks; i++) {
                     task_t task = {
-                        .type = RENDER_FRAME,
+                        .type = PROCESS_PRIMITIVES,
                         .frame = next_frame,
                         .chunk = i,
                         .render_params_ptr = rp,
@@ -211,16 +241,14 @@ void run_scheduler(scheduler_ctx_t* sched, task_t completed_task) {
 }
 
 typedef struct {
-	/* Per-worker scratch ctxs (reconfigured per chunk at task time) */
-	rendering_ctx_t*   render_ctx;   /* [num_workers]                             */
-	tio_gfx_ctx*       gfx_ctx;      /* [num_workers]                             */
+	rendering_ctx_t*      render_ctx;    /* [num_chunks] — per chunk, configured once at init */
+	primitive_pass_ctx_t* primitive_ctx; /* [num_chunks] — per chunk, like render_ctx          */
+	tio_gfx_ctx*       gfx_ctx;      /* [num_workers] — per worker, reconfigured per task  */
 	/* Output buffers — per (chunk, buffer) */
 	char**             gfx_out;      /* flat [num_chunks * num_buffers]           */
 	size_t*            gfx_out_size; /* flat [num_chunks * num_buffers]           */
 	size_t             gfx_out_cap;	 /* largest per-chunk output size; same for all*/
-	/* Precomputed per-chunk geometry / params */
-	int*               chunk_starty; /* [num_chunks]                              */
-	int*               chunk_endy;   /* [num_chunks]                              */
+	/* Precomputed per-chunk gfx params (applied via tio_gfx_set_params per task) */
 	tio_gfx_params*    chunk_gp;     /* [num_chunks]                              */
 	/* Parameters */
 	int num_workers;
@@ -246,7 +274,7 @@ static inline size_t* gfx_out_size_at(trender_ctx_t* ctx, int b, int c) {
 	return &ctx->gfx_out_size[c * ctx->num_buffers + b];
 }
 
-static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
+static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, int cols,
 	const cli_args_t* args) {
 	int num_workers                            = args->threads;
 	int num_chunks                             = num_workers; /* TODO: independent CLI flag later */
@@ -263,6 +291,11 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 
 	if (num_workers < 1) {
 		fprintf(stderr, "trender_ctx_init: need at least 1 worker thread\n");
+		return -1;
+	}
+	/* hint_mask packs one chunk per bit (bit 63 is the clipping sign bit). */
+	if (num_chunks > 63) {
+		fprintf(stderr, "trender_ctx_init: num_chunks (%d) must be <= 63 for hint_mask\n", num_chunks);
 		return -1;
 	}
 	/* The scheduler + main-writer pipeline always overlaps render and display,
@@ -292,18 +325,25 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	else if (display_mode == TIO_GFX_BACKEND_ITERM)
 	    strip_align = cell_height_px > 0 ? cell_height_px : 1;
 	else if (display_mode == TIO_GFX_BACKEND_KITTY)
-	    strip_align = cell_height_px > 0 ? cell_height_px : 1;
+	    strip_align = 1;
 	else {
 	    fprintf(stderr, "trender_ctx_init: unknown display_mode %d\n", (int)display_mode);
 	    return -1;
 	}
 
-	int chunk_height_align = strip_align * ctx->num_chunks;
+	/* rows must be a multiple of both strip_align (aligned strip boundaries) and
+	 * num_chunks (chunks divide evenly) — the LCM. */
+	int gcd_a = strip_align, gcd_b = ctx->num_chunks;
+	while (gcd_b) { int t = gcd_a % gcd_b; gcd_a = gcd_b; gcd_b = t; }
+	int chunk_height_align = strip_align / gcd_a * ctx->num_chunks;
 	ctx->rows -= ctx->rows % chunk_height_align;
 	rows = ctx->rows;
 
-	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_workers * sizeof(rendering_ctx_t));
+	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_chunks * sizeof(rendering_ctx_t));
 	if (!ctx->render_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (render_ctx)\n"); return -1; }
+
+	ctx->primitive_ctx = (primitive_pass_ctx_t*)malloc(ctx->num_chunks * sizeof(primitive_pass_ctx_t));
+	if (!ctx->primitive_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (primitive_ctx)\n"); return -1; }
 
 	ctx->gfx_ctx = (tio_gfx_ctx*)malloc(ctx->num_workers * sizeof(tio_gfx_ctx));
 	if (!ctx->gfx_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (gfx_ctx)\n"); return -1; }
@@ -314,15 +354,11 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 	ctx->gfx_out_size = (size_t*)malloc((size_t)ctx->num_chunks * num_buffers * sizeof(size_t));
 	if (!ctx->gfx_out_size) { fprintf(stderr, "trender_ctx_init: out of memory (gfx_out_size)\n"); return -1; }
 
-	ctx->chunk_starty = (int*)malloc((size_t)ctx->num_chunks * sizeof(int));
-	if (!ctx->chunk_starty) { fprintf(stderr, "trender_ctx_init: out of memory (chunk_starty)\n"); return -1; }
-	ctx->chunk_endy = (int*)malloc((size_t)ctx->num_chunks * sizeof(int));
-	if (!ctx->chunk_endy) { fprintf(stderr, "trender_ctx_init: out of memory (chunk_endy)\n"); return -1; }
 	ctx->chunk_gp = (tio_gfx_params*)malloc((size_t)ctx->num_chunks * sizeof(tio_gfx_params));
 	if (!ctx->chunk_gp) { fprintf(stderr, "trender_ctx_init: out of memory (chunk_gp)\n"); return -1; }
 
-	/* Precompute per-chunk geometry/params, tracking the largest chunk so every
-	 * per-worker scratch buffer and every output buffer is sized for the worst case. */
+	/* Precompute per-chunk geometry/params. render_ctx[c] is created once with this chunk's
+	 * geometry; track max chunk height for the per-worker gfx_ctx template + output cap. */
 	int max_h = 0;
 	ctx->gfx_out_cap = 0;
 	for (int c = 0; c < num_chunks; c++) {
@@ -331,9 +367,15 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		starty -= starty % strip_align;
 		endy   -= endy   % strip_align;
 		int chunk_height = endy - starty;
-		ctx->chunk_starty[c] = starty;
-		ctx->chunk_endy[c]   = endy;
 		if (chunk_height > max_h) max_h = chunk_height;
+
+		/* Per-chunk render ctx, configured once (width=cols, height=rows drive projection). */
+		ctx->render_ctx[c] = create_rendering_ctx(cols, rows, starty, endy);
+		ctx->render_ctx[c].chunk_index = c;
+		int num_triangles_per_chunk = (int)mesh->attrib.num_face_num_verts / num_chunks + num_chunks;
+		ctx->primitive_ctx[c] = create_primitive_pass_ctx(num_triangles_per_chunk, num_chunks);
+		ctx->primitive_ctx[c].width  = cols;
+		ctx->primitive_ctx[c].height = rows;
 
 		tio_gfx_params gp;
 		if (display_mode == TIO_GFX_BACKEND_SIXEL) {
@@ -372,16 +414,22 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 		if (cap > ctx->gfx_out_cap) ctx->gfx_out_cap = cap;
 	}
 
-	/* Per-worker scratch ctxs sized for the largest chunk; reconfigured per task. */
+	/* Every primitive ctx needs all chunk strip boundaries to compute hint_mask. */
+	for (int c = 0; c < num_chunks; c++) {
+		for (int k = 0; k < num_chunks; k++) {
+			ctx->primitive_ctx[c].chunk_starty[k] = ctx->render_ctx[k].starty;
+			ctx->primitive_ctx[c].chunk_endy[k]   = ctx->render_ctx[k].endy;
+		}
+	}
+
+	/* Per-worker gfx ctxs initialised at the largest chunk size (worst-case scratch);
+	 * reconfigured to the actual chunk via tio_gfx_set_params per task. */
 	tio_gfx_params gp_max = TIO_GFX_HALFBLOCK_PARAMS(cols, max_h);
 	if (display_mode == TIO_GFX_BACKEND_SIXEL)         gp_max = TIO_GFX_SIXEL_PARAMS(cols, max_h);
 	else if (display_mode == TIO_GFX_BACKEND_ITERM)    gp_max = TIO_GFX_ITERM_PARAMS(cols, max_h);
 	else if (display_mode == TIO_GFX_BACKEND_KITTY)    gp_max = TIO_GFX_KITTY_PARAMS(cols, max_h);
-	for (int w = 0; w < num_workers; w++) {
-		/* width=cols, height=rows for projection; framebuffers max_h tall (starty/endy set per task). */
-		ctx->render_ctx[w] = create_rendering_ctx(cols, rows, 0, max_h);
+	for (int w = 0; w < num_workers; w++)
 		tio_gfx_init(gfx_ctx_at(ctx, w), gp_max);
-	}
 
 	/* Every output buffer is the largest-chunk capacity so any chunk fits anywhere. */
 	for (int c = 0; c < num_chunks; c++) {
@@ -402,19 +450,20 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, int rows, int cols,
 }
 
 static inline void trender_ctx_destroy(trender_ctx_t* ctx) {
-	for (int w = 0; w < ctx->num_workers; w++) {
-		free_rendering_ctx(&ctx->render_ctx[w]);
-		tio_gfx_destroy(gfx_ctx_at(ctx, w));
+	for (int c = 0; c < ctx->num_chunks; c++) {
+		free_rendering_ctx(&ctx->render_ctx[c]);
+		free_primitive_pass_ctx(&ctx->primitive_ctx[c]);
 	}
+	for (int w = 0; w < ctx->num_workers; w++)
+		tio_gfx_destroy(gfx_ctx_at(ctx, w));
 	for (int c = 0; c < ctx->num_chunks; c++)
 		for (int b = 0; b < ctx->num_buffers; b++)
 			free(ctx->gfx_out[c * ctx->num_buffers + b]);
 	free(ctx->gfx_out);
 	free(ctx->gfx_out_size);
 	free(ctx->render_ctx);
+	free(ctx->primitive_ctx);
 	free(ctx->gfx_ctx);
-	free(ctx->chunk_starty);
-	free(ctx->chunk_endy);
 	free(ctx->chunk_gp);
 	scheduler_ctx_destroy(&ctx->sched);
 }
@@ -430,30 +479,42 @@ int worker_thread(void* arg) {
 		mpmc_queue_consume(&ctx->sched.parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 		if (task.type == EXIT_LOOP) break;
 
-		int c   = task.chunk;
-		int buf = task.frame % ctx->num_buffers;
-
-		/* Reconfigure this worker's scratch ctxs for the chunk's geometry. */
-		render_params_copy(&ctx->render_ctx[w].params, task.render_params_ptr);
-		ctx->render_ctx[w].starty = ctx->chunk_starty[c];
-		ctx->render_ctx[w].endy   = ctx->chunk_endy[c];
-		render_mesh(wa->mesh, &ctx->render_ctx[w]);
-
-		tio_gfx_set_params(gfx_ctx_at(ctx, w), ctx->chunk_gp[c]);
-		int parts;
-		if (ctx->display_mode == TIO_GFX_BACKEND_ITERM) {
-			parts = TIO_GFX_FULL;
-		} else {
-			parts = TIO_GFX_PAYLOAD;
-			if (c == 0)                    parts |= TIO_GFX_HEADER;
-			if (c == ctx->num_chunks - 1)  parts |= TIO_GFX_FOOTER;
+		if (task.type == PROCESS_PRIMITIVES) {
+			int c = task.chunk;
+			int num_chunks = ctx->sched.num_chunks;
+			int num_triangles = wa->mesh->attrib.num_face_num_verts;
+			int start_index = (num_triangles * c) / num_chunks;
+			int end_index = (num_triangles * (c + 1)) / num_chunks;
+			render_params_copy(&ctx->primitive_ctx[c].params, task.render_params_ptr);
+			primitive_pass(wa->mesh, &ctx->primitive_ctx[c], start_index, end_index);
 		}
-		*gfx_out_size_at(ctx, buf, c) = (size_t)tio_gfx_generate(
-		    gfx_ctx_at(ctx, w),
-		    ctx->render_ctx[w].output_buffer.data,
-		    TIO_GFX_FMT_RGB565, parts,
-		    gfx_out_at(ctx, buf, c), ctx->gfx_out_cap);
 
+		if (task.type == RENDER_FRAME) {
+			int c   = task.chunk;
+			int buf = task.frame % ctx->num_buffers;
+			clear_pass(&ctx->render_ctx[c]);
+
+			for (int pc = 0; pc < ctx->sched.num_chunks; pc++) {
+				/* render_ctx/primitive_ctx are per chunk (configured once); gfx_ctx is per worker (reconfigured per task). */
+				render_mesh(wa->mesh, &ctx->render_ctx[c], &ctx->primitive_ctx[pc]);
+			}
+
+			tio_gfx_set_params(gfx_ctx_at(ctx, w), ctx->chunk_gp[c]);
+			int parts;
+			if (ctx->display_mode == TIO_GFX_BACKEND_ITERM) {
+				parts = TIO_GFX_FULL;
+			} else {
+				parts = TIO_GFX_PAYLOAD;
+				if (c == 0)                    parts |= TIO_GFX_HEADER;
+				if (c == ctx->num_chunks - 1)  parts |= TIO_GFX_FOOTER;
+			}
+			*gfx_out_size_at(ctx, buf, c) = (size_t)tio_gfx_generate(
+				gfx_ctx_at(ctx, w),
+				ctx->render_ctx[c].output_buffer.data,
+				TIO_GFX_FMT_RGB565, parts,
+				gfx_out_at(ctx, buf, c), ctx->gfx_out_cap);
+		}
+		
 		run_scheduler(&ctx->sched, task);
 	}
 	return 0;
@@ -475,7 +536,7 @@ static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio
 	render_params_t* rp0 = &sched->render_params_buf[0];
 	render_params_copy(rp0, &sched->input_state.render_params);
 	for (int c = 0; c < ctx->num_chunks; c++) {
-		task_t task = { .type = RENDER_FRAME, .frame = 0, .chunk = c, .render_params_ptr = rp0 };
+		task_t task = { .type = PROCESS_PRIMITIVES, .frame = 0, .chunk = c, .render_params_ptr = rp0 };
 		mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 	}
 
@@ -536,47 +597,56 @@ static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio
 
 static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
 	const double inv_f = (num_frames > 0) ? 1.0 / num_frames : 0.0;
-	const int n = ctx->num_workers;
 
-	/* ── Per-thread table ────────────────────────────────────────────────── */
-	printf("Per-thread totals (ms):\r\n");
-	printf("  Thread  %-12s %-12s %-12s %-12s %-12s\r\n",
-	       "Clear", "Raster", "Texture", "Generate", "Thread-total");
+	/* Render timings are per chunk; generate timing is per worker — they have
+	 * different counts, so accumulate and print them separately. */
+
+	/* ── Per-chunk render totals ─────────────────────────────────────────── */
+	printf("Per-chunk render totals (ms):\r\n");
+	printf("  Chunk   %-12s %-12s %-12s %-12s\r\n", "Primitive", "Clear", "Raster", "Texture");
+	double total_primitive_time        = 0.0;
 	double total_clear_time            = 0.0;
 	double total_rasterisation_time    = 0.0;
 	double total_texture_sampling_time = 0.0;
-	double total_generate_ms           = 0.0;
-	for (int i = 0; i < n; i++) {
-		double cl  = ctx->render_ctx[i].total_clear_time;
-		double ra  = ctx->render_ctx[i].total_rasterisation_time;
-		double tx  = ctx->render_ctx[i].total_texture_sampling_time;
-		double gen = tio_gfx_total_ms(gfx_ctx_at(ctx, i));
-		double thr = cl + ra + tx + gen;
-		printf("  %-7d %-12.2f %-12.2f %-12.2f %-12.2f %-12.2f\r\n",
-		       i + 1, cl, ra, tx, gen, thr);
+	for (int c = 0; c < ctx->num_chunks; c++) {
+		double pr = ctx->primitive_ctx[c].total_primitive_time;
+		double cl = ctx->render_ctx[c].total_clear_time;
+		double ra = ctx->render_ctx[c].total_rasterisation_time;
+		double tx = ctx->render_ctx[c].total_texture_sampling_time;
+		printf("  %-7d %-12.2f %-12.2f %-12.2f %-12.2f\r\n", c, pr, cl, ra, tx);
+		total_primitive_time        += pr;
 		total_clear_time            += cl;
 		total_rasterisation_time    += ra;
 		total_texture_sampling_time += tx;
-		total_generate_ms           += gen;
 	}
 
-	printf("Per-thread averages (ms/frame):\r\n");
-	printf("  Thread  %-12s %-12s %-12s %-12s %-12s\r\n",
-	       "Clear", "Raster", "Texture", "Generate", "Thread-total");
-	for (int i = 0; i < n; i++) {
-		double cl  = ctx->render_ctx[i].total_clear_time;
-		double ra  = ctx->render_ctx[i].total_rasterisation_time;
-		double tx  = ctx->render_ctx[i].total_texture_sampling_time;
-		double gen = tio_gfx_total_ms(gfx_ctx_at(ctx, i));
-		printf("  %-7d %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f\r\n",
-		       i + 1, cl * inv_f, ra * inv_f, tx * inv_f, gen * inv_f,
-		       (cl + ra + tx + gen) * inv_f);
+	/* ── Per-chunk render averages ───────────────────────────────────────── */
+	printf("Per-chunk render averages (ms/frame):\r\n");
+	printf("  Chunk   %-12s %-12s %-12s %-12s\r\n", "Primitive", "Clear", "Raster", "Texture");
+	for (int c = 0; c < ctx->num_chunks; c++) {
+		double pr = ctx->primitive_ctx[c].total_primitive_time;
+		double cl = ctx->render_ctx[c].total_clear_time;
+		double ra = ctx->render_ctx[c].total_rasterisation_time;
+		double tx = ctx->render_ctx[c].total_texture_sampling_time;
+		printf("  %-7d %-12.3f %-12.3f %-12.3f %-12.3f\r\n",
+		       c, pr * inv_f, cl * inv_f, ra * inv_f, tx * inv_f);
+	}
+
+	/* ── Per-worker generate table ───────────────────────────────────────── */
+	printf("Per-worker generate totals (ms):\r\n");
+	printf("  Worker  %-12s\r\n", "Generate");
+	double total_generate_ms = 0.0;
+	for (int w = 0; w < ctx->num_workers; w++) {
+		double gen = tio_gfx_total_ms(gfx_ctx_at(ctx, w));
+		printf("  %-7d %-12.2f\r\n", w, gen);
+		total_generate_ms += gen;
 	}
 
 	/* ── Overall totals ──────────────────────────────────────────────────── */
-	double total_frame_gen_time = total_clear_time + total_rasterisation_time +
+	double total_frame_gen_time = total_primitive_time + total_clear_time + total_rasterisation_time +
 	                              total_texture_sampling_time + total_generate_ms;
 	printf("Overall totals (ms):\r\n");
+	printf("  primitive time:        %0.2f\r\n", total_primitive_time);
 	printf("  clear time:            %0.2f\r\n", total_clear_time);
 	printf("  rasterisation time:    %0.2f\r\n", total_rasterisation_time);
 	printf("  texture_sampling time: %0.2f\r\n", total_texture_sampling_time);
@@ -584,6 +654,7 @@ static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
 	printf("  frame_gen time:        %0.2f\r\n", total_frame_gen_time);
 	printf("  display time:          %0.2f\r\n", ctx->total_display_time);
 	printf("Overall averages (ms/frame):\r\n");
+	printf("  primitive time:        %0.3f\r\n", total_primitive_time        * inv_f);
 	printf("  clear time:            %0.3f\r\n", total_clear_time            * inv_f);
 	printf("  rasterisation time:    %0.3f\r\n", total_rasterisation_time    * inv_f);
 	printf("  texture_sampling time: %0.3f\r\n", total_texture_sampling_time * inv_f);

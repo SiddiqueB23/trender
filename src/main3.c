@@ -199,7 +199,7 @@ int main(int argc, char* argv[]) {
 	fflush(stdout);
 
 	trender_ctx_t ctx;
-	if (trender_ctx_init(&ctx, rows, cols, &args) != 0)
+	if (trender_ctx_init(&ctx, &mesh, rows, cols, &args) != 0)
 		return 1;
 
 	/* trender_ctx_init may align rows down to a multiple of the chunk height. */
