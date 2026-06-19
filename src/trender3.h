@@ -20,6 +20,45 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* ── Kitty display strategy: multi-id, split transmit/display double buffering ──────
+ *
+ * Continuously streaming a full new frame to kitty every tick is fighting three of the
+ * protocol's behaviours, each of which broke a naive approach:
+ *
+ *   1. Re-transmitting data to an existing image id deletes that image AND all of its
+ *      placements ("the existing image and all its placements must be deleted"). So you
+ *      cannot update the *currently displayed* id in place — it blanks every frame.
+ *   2. Animation frames (a=f) leak storage: editing a frame each tick keeps allocating
+ *      coalesced buffers that are never freed, so the 320 MiB graphics quota is hit after
+ *      a few hundred frames and kitty evicts our image → permanent black mid-run.
+ *   3. A combined transmit-and-display (a=T) creates the placement up front, so a frame
+ *      spanning hundreds of chunks can be shown half-received → tearing.
+ *
+ * The scheme below sidesteps all three:
+ *
+ *   - Cycle round-robin through K = NUM_IMAGES image ids (BASE .. BASE+K-1), one id per
+ *     frame. The id a frame draws to was freed K-1 frames ago, so it is fresh — drawing
+ *     to it never disturbs the ids currently on screen (fixes #1).
+ *   - Split transmit from display: load the pixels with a=t (transmit only, no placement
+ *     ⇒ nothing is shown yet), and only after the final chunk lands issue a=p to display
+ *     the now-complete image atomically (fixes #3).
+ *   - Free the image from K-1 frames back with a=d,d=I (uppercase d=I frees the data;
+ *     lowercase d=i would only drop the placement), keeping storage bounded to ~K images
+ *     (fixes #2). Deferring the delete by K-1 frames also leaves the previously displayed
+ *     image up while the new one is being prepared.
+ *   - Drive the placement z-index more negative each frame (Z_BASE - frame*Z_STEP; all
+ *     stay < 0, i.e. below the text overlay). Each completed frame is therefore placed
+ *     *behind* the current one and revealed cleanly when the old top image is deleted next
+ *     cycle — the swap is "remove the top to reveal the ready frame underneath", with no
+ *     compositing flash. Z_STEP tunes the spacing (0 = all same z, rely on atomic a=p).
+ *
+ * NUM_IMAGES is the pipeline depth: 2 = double buffering, 3 = triple, etc.
+ */
+#define TRENDER_KITTY_IMAGE_ID_BASE 31
+#define TRENDER_KITTY_NUM_IMAGES    3
+#define TRENDER_KITTY_Z_BASE        (-1)
+#define TRENDER_KITTY_Z_STEP        2
+
 enum task_type {
 	PROCESS_PRIMITIVES,
     RENDER_FRAME,
@@ -393,7 +432,9 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 			gp.p.kitty.upscale_y      = upscale_y;
 			gp.p.kitty.cell_height_px = cell_height_px;
 			gp.p.kitty.cell_width_px  = cell_width_px;
-			gp.p.kitty.full_height    = (c == 0) ? rows : 0;
+			/* full image height on every chunk: the header strip needs it for the a=t v=
+			   (total image height) and the footer strip needs it for the a=p put's r=. */
+			gp.p.kitty.full_height    = rows;
 		} else if (display_mode == TIO_GFX_BACKEND_HALFBLOCK) {
 			gp = TIO_GFX_HALFBLOCK_PARAMS(cols, chunk_height);
 			gp.p.halfblock.color_mode      = hb_color_mode;
@@ -494,7 +535,23 @@ int worker_thread(void* arg) {
 				render_mesh(wa->mesh, &ctx->render_ctx[c], &ctx->primitive_ctx[pc]);
 			}
 
-			tio_gfx_set_params(gfx_ctx_at(ctx, w), ctx->chunk_gp[c]);
+			tio_gfx_params gp = ctx->chunk_gp[c];
+			if (ctx->display_mode == TIO_GFX_BACKEND_KITTY) {
+				/* Cycle through K=NUM_IMAGES ids. Draw to id[frame%K] (idle — it was
+				   freed K-1 frames ago, so the displayed ids stay up during transmit),
+				   then free id[(frame-(K-1))%K], the image displayed K-1 frames back.
+				   The first K-1 frames have nothing old enough to delete yet. */
+				int k   = TRENDER_KITTY_NUM_IMAGES;
+				int cur = TRENDER_KITTY_IMAGE_ID_BASE + (task.frame % k);
+				int prev = (task.frame >= k - 1)
+				         ? TRENDER_KITTY_IMAGE_ID_BASE + ((task.frame - (k - 1)) % k)
+				         : 0;
+				gp.p.kitty.frame_mode     = TIO_GFX_KITTY_FRAME_PINGPONG;
+				gp.p.kitty.image_id       = cur;
+				gp.p.kitty.prev_image_id  = prev;
+				gp.p.kitty.z_index        = TRENDER_KITTY_Z_BASE - task.frame * TRENDER_KITTY_Z_STEP;
+			}
+			tio_gfx_set_params(gfx_ctx_at(ctx, w), gp);
 			int parts;
 			if (ctx->display_mode == TIO_GFX_BACKEND_ITERM) {
 				parts = TIO_GFX_FULL;
@@ -588,6 +645,16 @@ static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio
 		thread_join(threads[i]);
 	free(threads);
 	free(wargs);
+
+	/* Leaving the final image on screen (no delete on exit). To instead free all
+	   pipeline images on exit, re-enable:
+	// if (ctx->display_mode == TIO_GFX_BACKEND_KITTY) {
+	// 	char del[32 * TRENDER_KITTY_NUM_IMAGES]; int n = 0;
+	// 	for (int k = 0; k < TRENDER_KITTY_NUM_IMAGES; k++)
+	// 		n += tio_gfx_kitty_delete_image_seq(TRENDER_KITTY_IMAGE_ID_BASE + k, del + n, sizeof(del) - n);
+	// 	tio_write(tio, del, (size_t)n);
+	// }
+	*/
 }
 
 static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
