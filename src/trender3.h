@@ -293,11 +293,6 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 		fprintf(stderr, "trender_ctx_init: need at least 1 worker thread\n");
 		return -1;
 	}
-	/* hint_mask packs one chunk per bit (bit 63 is the clipping sign bit). */
-	if (num_chunks > 63) {
-		fprintf(stderr, "trender_ctx_init: num_chunks (%d) must be <= 63 for hint_mask\n", num_chunks);
-		return -1;
-	}
 	/* The scheduler + main-writer pipeline always overlaps render and display,
 	 * so it needs at least double buffering even for a single worker. args.h
 	 * coerces buffers=1 when threads==1, so bump it back up here. */
