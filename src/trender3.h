@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 /* ── Kitty display strategy: multi-id, split transmit/display double buffering ──────
  *
@@ -62,6 +63,7 @@
 enum task_type {
 	PROCESS_PRIMITIVES,
     RENDER_FRAME,
+    ENCODE_FRAME,
     DISPLAY_FRAME,
     EXIT_LOOP,
 };
@@ -69,7 +71,8 @@ enum task_type {
 typedef struct {
     int type;
     int frame;
-    int chunk;
+    int chunk_y;
+    int chunk_x;
     render_params_t* render_params_ptr;
 } task_t;
 
@@ -77,6 +80,7 @@ typedef struct {
     /* configuration */
     int num_buffers;
 	int num_render_pass_chunks_y;
+	int num_render_pass_chunks_x;
 	int num_prim_pass_chunks;
     int num_workers;
     int num_frames;
@@ -84,8 +88,10 @@ typedef struct {
 
 	/* primitive processing completion state [num_prim_pass_chunks] */
 	bool*          	primitive_chunk_procesed;
-    /* rendering and display completion state — flat [num_buffers*2 × num_render_pass_chunks_y] */
+    /* rendering completion state — flat [num_buffers*2 × num_render_pass_chunks_y × num_render_pass_chunks_x] */
     bool*           rendering_completed;
+    /* encode and display completion state — flat [num_buffers*2 × num_render_pass_chunks_y] */
+    bool*           encode_completed;
     bool*           display_completed;
     thread_mutex_t  state_mutex;
 
@@ -102,29 +108,35 @@ typedef struct {
 
     /* scheduler cursors */
     int frame_to_be_displayed;
-    int chunk_to_be_displayed;
+    int row_to_be_displayed;
+
+	/* Frame generation timer */
+	monotonic_timer_t timer;
+	double total_frame_gen_time;
 } scheduler_ctx_t;
 
-void scheduler_ctx_init(scheduler_ctx_t* sched, int num_buffers, 
-						int num_render_pass_chunks_y, int num_prim_pass_chunks,
+void scheduler_ctx_init(scheduler_ctx_t* sched, int num_buffers,
+						int num_render_pass_chunks_y, int num_render_pass_chunks_x, int num_prim_pass_chunks,
                         int num_workers, int num_frames,
                         int queue_capacity) {
     sched->num_buffers              = num_buffers;
     sched->num_render_pass_chunks_y = num_render_pass_chunks_y;
+    sched->num_render_pass_chunks_x = num_render_pass_chunks_x;
     sched->num_prim_pass_chunks     = num_prim_pass_chunks;
     sched->num_workers              = num_workers;
     sched->num_frames               = num_frames;
     sched->queue_capacity           = queue_capacity;
     sched->frame_to_be_displayed    = 0;
-    sched->chunk_to_be_displayed    = 0;
+    sched->row_to_be_displayed      = 0;
 
     int nb2 = num_buffers * 2;
-    sched->rendering_completed       = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y), sizeof(bool));
+    sched->rendering_completed       = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y * num_render_pass_chunks_x), sizeof(bool));
+    sched->encode_completed          = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y), sizeof(bool));
     sched->display_completed         = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y), sizeof(bool));
     sched->primitive_chunk_procesed = (bool*)calloc((size_t)(num_prim_pass_chunks), sizeof(bool));
     sched->render_params_buf         = (render_params_t*)calloc((size_t)nb2, sizeof(render_params_t));
     thread_mutex_init(&sched->state_mutex);
-	
+
     sched->parallel_work_queue_buf = (task_t*)malloc((size_t)queue_capacity * sizeof(task_t));
     sched->display_queue_buf       = (task_t*)malloc((size_t)queue_capacity * sizeof(task_t));
     mpmc_queue_init(&sched->parallel_work_queue, queue_capacity, sizeof(task_t), sched->parallel_work_queue_buf);
@@ -134,10 +146,13 @@ void scheduler_ctx_init(scheduler_ctx_t* sched, int num_buffers,
     for (int i = num_buffers; i < nb2; i++)
         for (int j = 0; j < num_render_pass_chunks_y; j++)
             sched->display_completed[i * num_render_pass_chunks_y + j] = true;
+
+	sched->total_frame_gen_time = 0.0;
 }
 
 void scheduler_ctx_destroy(scheduler_ctx_t* sched) {
     free(sched->rendering_completed);
+    free(sched->encode_completed);
     free(sched->display_completed);
     free(sched->render_params_buf);
     free(sched->parallel_work_queue_buf);
@@ -145,30 +160,8 @@ void scheduler_ctx_destroy(scheduler_ctx_t* sched) {
     thread_mutex_term(&sched->state_mutex);
 }
 
-void print_task(task_t task) {
-    printf("TASK: %d %d %d\n", task.type, task.frame, task.chunk);
-}
-
-void print_state(scheduler_ctx_t* sched) {
-    int nb2 = sched->num_buffers * 2;
-    printf("R: ");
-    for (int i = 0; i < nb2; i++) {
-        for (int j = 0; j < sched->num_render_pass_chunks_y; j++)
-            printf("%d", sched->rendering_completed[i * sched->num_render_pass_chunks_y + j]);
-        printf(" ");
-    }
-    printf("\n");
-    printf("D: ");
-    for (int i = 0; i < nb2; i++) {
-        for (int j = 0; j < sched->num_render_pass_chunks_y; j++)
-            printf("%d", sched->display_completed[i * sched->num_render_pass_chunks_y + j]);
-        printf(" ");
-    }
-    printf("\n");
-}
-
 void emit_exit_tasks(scheduler_ctx_t* sched) {
-    task_t task = { .type = EXIT_LOOP, .frame = 0, .chunk = 0, .render_params_ptr = NULL };
+    task_t task = { .type = EXIT_LOOP, .frame = 0, .chunk_y = 0, .chunk_x = 0, .render_params_ptr = NULL };
     for (int i = 0; i < sched->num_workers; i++)
         mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
     mpmc_queue_produce(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
@@ -190,10 +183,14 @@ void reset_queuable(scheduler_ctx_t* sched, int frame) {
     int nb2                    = sched->num_buffers * 2;
     int frame_minus_one        = (frame + nb2 - 1) % nb2;
     int frame_minus_num_bufs   = (frame + sched->num_buffers) % nb2;
-    for (int i = 0; i < sched->num_render_pass_chunks_y; i++)
-        sched->rendering_completed[frame_minus_one * sched->num_render_pass_chunks_y + i] = false;
-    for (int i = 0; i < sched->num_render_pass_chunks_y; i++)
-        sched->display_completed[frame_minus_num_bufs * sched->num_render_pass_chunks_y + i] = false;
+    int num_y                  = sched->num_render_pass_chunks_y;
+    int num_x                  = sched->num_render_pass_chunks_x;
+    for (int i = 0; i < num_y * num_x; i++)
+        sched->rendering_completed[frame_minus_one * num_y * num_x + i] = false;
+    for (int i = 0; i < num_y; i++)
+        sched->encode_completed[frame_minus_one * num_y + i] = false;
+    for (int i = 0; i < num_y; i++)
+        sched->display_completed[frame_minus_num_bufs * num_y + i] = false;
 }
 
 bool frame_queueable(scheduler_ctx_t* sched, int frame) {
@@ -202,7 +199,7 @@ bool frame_queueable(scheduler_ctx_t* sched, int frame) {
     int frame_minus_num_bufs   = (frame + sched->num_buffers) % nb2;
     bool rendered_all = true, displayed_all = true;
     for (int i = 0; i < sched->num_render_pass_chunks_y; i++)
-        rendered_all  = rendered_all  && sched->rendering_completed[frame_minus_one * sched->num_render_pass_chunks_y + i];
+        rendered_all  = rendered_all  && sched->encode_completed[frame_minus_one * sched->num_render_pass_chunks_y + i];
     for (int i = 0; i < sched->num_render_pass_chunks_y; i++)
         displayed_all = displayed_all && sched->display_completed[frame_minus_num_bufs * sched->num_render_pass_chunks_y + i];
     return rendered_all && displayed_all;
@@ -210,20 +207,24 @@ bool frame_queueable(scheduler_ctx_t* sched, int frame) {
 
 void run_scheduler(scheduler_ctx_t* sched, task_t completed_task) {
     thread_mutex_lock(&sched->state_mutex);
-    int chunk  = completed_task.chunk;
-    int frame  = completed_task.frame;
-    int nb2    = sched->num_buffers * 2;
-    int buffer = frame % nb2;
+    int chunk_y = completed_task.chunk_y;
+    int chunk_x = completed_task.chunk_x;
+    int frame   = completed_task.frame;
+    int nb2     = sched->num_buffers * 2;
+    int buffer  = frame % nb2;
+    int num_x   = sched->num_render_pass_chunks_x;
+    int num_y   = sched->num_render_pass_chunks_y;
 
 	if (completed_task.type == PROCESS_PRIMITIVES) {
-		sched->primitive_chunk_procesed[chunk] = true;
+		sched->primitive_chunk_procesed[chunk_y] = true;
 		if(frame_rasterisable(sched)) {
 			reset_rasterisable(sched);
-			for (int i = 0; i < sched->num_render_pass_chunks_y; i++) {
+			for (int i = 0; i < num_x; i++) {
 				task_t task = {
 					.type = RENDER_FRAME,
 					.frame = frame,
-					.chunk = i,
+					.chunk_y = 0,
+					.chunk_x = i,
 					.render_params_ptr = NULL,
 				};
 				mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
@@ -231,32 +232,62 @@ void run_scheduler(scheduler_ctx_t* sched, task_t completed_task) {
 		}
 	}
     if (completed_task.type == RENDER_FRAME) {
-        sched->rendering_completed[buffer * sched->num_render_pass_chunks_y + chunk] = true;
+        sched->rendering_completed[(buffer * num_y + chunk_y) * num_x + chunk_x] = true;
+        bool row_rendered = true;
+        for (int i = 0; i < num_x; i++)
+            row_rendered = row_rendered && sched->rendering_completed[(buffer * num_y + chunk_y) * num_x + i];
+        if (row_rendered) {
+            task_t encode_task = {
+                .type = ENCODE_FRAME,
+                .frame = frame,
+                .chunk_y = chunk_y,
+                .chunk_x = 0,
+                .render_params_ptr = NULL,
+            };
+            mpmc_queue_produce(&sched->parallel_work_queue, &encode_task, MPMC_QUEUE_WAIT_INFINITE);
+            if (chunk_y + 1 < num_y) {
+                for (int i = 0; i < num_x; i++) {
+                    task_t task = {
+                        .type = RENDER_FRAME,
+                        .frame = frame,
+                        .chunk_y = chunk_y + 1,
+                        .chunk_x = i,
+                        .render_params_ptr = NULL,
+                    };
+                    mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
+                }
+            }
+        }
+    }
+    if (completed_task.type == ENCODE_FRAME) {
+        sched->encode_completed[buffer * num_y + chunk_y] = true;
         int buf_disp = sched->frame_to_be_displayed % nb2;
         while (sched->frame_to_be_displayed == frame &&
-               sched->rendering_completed[buf_disp * sched->num_render_pass_chunks_y + sched->chunk_to_be_displayed]) {
+               sched->encode_completed[buf_disp * num_y + sched->row_to_be_displayed]) {
             task_t task = {
                 .type = DISPLAY_FRAME,
                 .frame = sched->frame_to_be_displayed,
-                .chunk = sched->chunk_to_be_displayed,
+                .chunk_y = sched->row_to_be_displayed,
+                .chunk_x = 0,
                 .render_params_ptr = NULL,
             };
             mpmc_queue_produce(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
-            sched->chunk_to_be_displayed++;
-            if (sched->chunk_to_be_displayed >= sched->num_render_pass_chunks_y) {
-                sched->chunk_to_be_displayed = 0;
+            sched->row_to_be_displayed++;
+            if (sched->row_to_be_displayed >= num_y) {
+				sched->total_frame_gen_time += timer_elapsed_ms(&sched->timer);
+                sched->row_to_be_displayed = 0;
                 sched->frame_to_be_displayed++;
             }
         }
     }
     if (completed_task.type == DISPLAY_FRAME) {
-        sched->display_completed[buffer * sched->num_render_pass_chunks_y + chunk] = true;
-        if (frame == sched->num_frames - 1 && chunk == sched->num_render_pass_chunks_y - 1)
+        sched->display_completed[buffer * num_y + chunk_y] = true;
+        if (frame == sched->num_frames - 1 && chunk_y == num_y - 1)
             emit_exit_tasks(sched);
     }
-    if (completed_task.type == DISPLAY_FRAME || completed_task.type == RENDER_FRAME) {
+    if (completed_task.type == DISPLAY_FRAME || completed_task.type == ENCODE_FRAME) {
         int next_frame = sched->num_frames;
-        if (completed_task.type == RENDER_FRAME)  next_frame = frame + 1;
+        if (completed_task.type == ENCODE_FRAME)  next_frame = frame + 1;
         if (completed_task.type == DISPLAY_FRAME) next_frame = frame + sched->num_buffers;
         if (frame_queueable(sched, next_frame) && next_frame < sched->num_frames) {
             reset_queuable(sched, next_frame);
@@ -267,11 +298,13 @@ void run_scheduler(scheduler_ctx_t* sched, task_t completed_task) {
             if (should_exit) {
                 emit_exit_tasks(sched);
             } else {
+				timer_start(&sched->timer);
                 for (int i = 0; i < sched->num_prim_pass_chunks; i++) {
                     task_t task = {
                         .type = PROCESS_PRIMITIVES,
                         .frame = next_frame,
-                        .chunk = i,
+                        .chunk_y = i,
+                        .chunk_x = 0,
                         .render_params_ptr = rp,
                     };
                     mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
@@ -290,12 +323,15 @@ typedef struct {
 	char**             gfx_out;      /* flat [num_render_pass_chunks_y * num_buffers]           */
 	size_t*            gfx_out_size; /* flat [num_render_pass_chunks_y * num_buffers]           */
 	size_t             gfx_out_cap;	 /* largest per-chunk output size; same for all*/
+	/* Combined per-row RGB565 buffer, written by ENCODE_FRAME before tio_gfx_generate */
+	framebuffer_u16*   combined_row_buffer; /* flat [num_render_pass_chunks_y * num_buffers] */
 	/* Precomputed per-chunk gfx params (applied via tio_gfx_set_params per task) */
 	tio_gfx_params*    chunk_gp;     /* [num_render_pass_chunks_y]                              */
 	/* Parameters */
 	int num_workers;
 	int num_buffers;
 	int num_render_pass_chunks_y;
+	int num_render_pass_chunks_x;
 	int num_prim_pass_chunks;
 	int rows, cols;
 	tio_gfx_backend display_mode;
@@ -310,6 +346,12 @@ typedef struct {
 static inline tio_gfx_ctx* gfx_ctx_at(trender_ctx_t* ctx, int w) {
 	return &ctx->gfx_ctx[w];
 }
+static inline rendering_ctx_t* render_ctx_at(trender_ctx_t* ctx, int row, int col) {
+	return &ctx->render_ctx[row * ctx->num_render_pass_chunks_x + col];
+}
+static inline framebuffer_u16* combined_row_at(trender_ctx_t* ctx, int buf, int row) {
+	return &ctx->combined_row_buffer[row * ctx->num_buffers + buf];
+}
 static inline char* gfx_out_at(trender_ctx_t* ctx, int b, int c) {
 	return ctx->gfx_out[c * ctx->num_buffers + b];
 }
@@ -321,6 +363,7 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 	const cli_args_t* args) {
 	int num_workers                            = args->threads;
 	int num_render_pass_chunks_y               = num_workers * 4; /* TODO: independent CLI flag later */
+	int num_render_pass_chunks_x               = num_workers * 4;
 	int num_prim_pass_chunks                   = num_workers;
 	int num_buffers                            = args->buffers;
 	tio_gfx_backend display_mode               = args->display_mode;
@@ -379,7 +422,14 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 	ctx->rows -= ctx->rows % chunk_height_align;
 	rows = ctx->rows;
 
-	ctx->render_ctx = (rendering_ctx_t*)malloc(ctx->num_render_pass_chunks_y * sizeof(rendering_ctx_t));
+	/* cols must be a multiple of 8 (AVX2 raster loop) and of num_render_pass_chunks_x
+	 * (chunks divide evenly); clamping to a multiple of 8*num_render_pass_chunks_x
+	 * guarantees both, since each chunk's own width is then a multiple of 8. */
+	ctx->cols -= ctx->cols % (8 * num_render_pass_chunks_x);
+	cols = ctx->cols;
+
+	ctx->num_render_pass_chunks_x = num_render_pass_chunks_x;
+	ctx->render_ctx = (rendering_ctx_t*)malloc((size_t)ctx->num_render_pass_chunks_y * num_render_pass_chunks_x * sizeof(rendering_ctx_t));
 	if (!ctx->render_ctx) { fprintf(stderr, "trender_ctx_init: out of memory (render_ctx)\n"); return -1; }
 
 	ctx->primitive_ctx = (primitive_pass_ctx_t*)malloc(ctx->num_prim_pass_chunks * sizeof(primitive_pass_ctx_t));
@@ -397,8 +447,16 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 	ctx->chunk_gp = (tio_gfx_params*)malloc((size_t)ctx->num_render_pass_chunks_y * sizeof(tio_gfx_params));
 	if (!ctx->chunk_gp) { fprintf(stderr, "trender_ctx_init: out of memory (chunk_gp)\n"); return -1; }
 
-	/* Precompute per-chunk geometry/params. render_ctx[c] is created once with this chunk's
-	 * geometry; track max chunk height for the per-worker gfx_ctx template + output cap. */
+	/* Per-X-chunk column boundaries — shared across all rows (chunk width doesn't depend on row). */
+	int* chunk_startx = (int*)malloc((size_t)num_render_pass_chunks_x * sizeof(int));
+	int* chunk_endx   = (int*)malloc((size_t)num_render_pass_chunks_x * sizeof(int));
+	for (int x = 0; x < num_render_pass_chunks_x; x++) {
+		chunk_startx[x] = (cols * x) / num_render_pass_chunks_x;
+		chunk_endx[x]   = (cols * (x + 1)) / num_render_pass_chunks_x;
+	}
+
+	/* Precompute per-chunk geometry/params. render_ctx_at(ctx,c,x) is created once with that
+	 * cell's geometry; track max chunk height for the per-worker gfx_ctx template + output cap. */
 	int max_h = 0;
 	ctx->gfx_out_cap = 0;
 	for (int c = 0; c < num_render_pass_chunks_y; c++) {
@@ -409,9 +467,12 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 		int chunk_height = endy - starty;
 		if (chunk_height > max_h) max_h = chunk_height;
 
-		/* Per-chunk render ctx, configured once (width=cols, height=rows drive projection). */
-		ctx->render_ctx[c] = create_rendering_ctx(cols, rows, starty, endy);
-		ctx->render_ctx[c].chunk_index = c;
+		/* Per-cell render ctx, configured once (width=cols, height=rows drive projection). */
+		for (int x = 0; x < num_render_pass_chunks_x; x++) {
+			rendering_ctx_t* cell = render_ctx_at(ctx, c, x);
+			*cell = create_rendering_ctx(cols, rows, chunk_startx[x], chunk_endx[x], starty, endy);
+			cell->chunk_index = c * num_render_pass_chunks_x + x;
+		}
 
 		tio_gfx_params gp;
 		if (display_mode == TIO_GFX_BACKEND_SIXEL) {
@@ -453,12 +514,12 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 	}
 
 	/* Per-chunk primitive ctx, sized independently from the render chunks above.
-	 * chunk_hints is still indexed per render chunk (clipping hints are tested
-	 * against render-chunk bounds), so create_primitive_pass_ctx still takes
-	 * num_render_pass_chunks_y as its chunk count. */
+	 * chunk_hints is indexed per render-chunk cell (clipping hints are tested
+	 * against render-chunk bounds), so create_primitive_pass_ctx takes both
+	 * num_render_pass_chunks_y and num_render_pass_chunks_x as its chunk counts. */
 	for (int c = 0; c < num_prim_pass_chunks; c++) {
 		int num_triangles_per_chunk = (int)mesh->attrib.num_face_num_verts / num_prim_pass_chunks + num_prim_pass_chunks;
-		ctx->primitive_ctx[c] = create_primitive_pass_ctx(num_triangles_per_chunk, num_render_pass_chunks_y);
+		ctx->primitive_ctx[c] = create_primitive_pass_ctx(num_triangles_per_chunk, num_render_pass_chunks_y, num_render_pass_chunks_x);
 		ctx->primitive_ctx[c].width  = cols;
 		ctx->primitive_ctx[c].height = rows;
 	}
@@ -466,10 +527,16 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 	/* Every primitive ctx needs all chunk strip boundaries to compute hint_mask. */
 	for (int c = 0; c < num_prim_pass_chunks; c++) {
 		for (int k = 0; k < num_render_pass_chunks_y; k++) {
-			ctx->primitive_ctx[c].chunk_starty[k] = ctx->render_ctx[k].starty;
-			ctx->primitive_ctx[c].chunk_endy[k]   = ctx->render_ctx[k].endy;
+			ctx->primitive_ctx[c].chunk_starty[k] = render_ctx_at(ctx, k, 0)->starty;
+			ctx->primitive_ctx[c].chunk_endy[k]   = render_ctx_at(ctx, k, 0)->endy;
+		}
+		for (int k = 0; k < num_render_pass_chunks_x; k++) {
+			ctx->primitive_ctx[c].chunk_startx[k] = chunk_startx[k];
+			ctx->primitive_ctx[c].chunk_endx[k]   = chunk_endx[k];
 		}
 	}
+	free(chunk_startx);
+	free(chunk_endx);
 
 	/* Per-worker gfx ctxs initialised at the largest chunk size (worst-case scratch);
 	 * reconfigured to the actual chunk via tio_gfx_set_params per task. */
@@ -492,16 +559,26 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 		}
 	}
 
-	int queue_capacity = (num_render_pass_chunks_y) * (num_buffers + 2) + num_prim_pass_chunks + num_workers + 8;
-	scheduler_ctx_init(&ctx->sched, num_buffers, 
-					   num_render_pass_chunks_y, num_prim_pass_chunks,
+	/* Combined per-row buffer, full row width, double/triple-buffered like gfx_out. */
+	ctx->combined_row_buffer = (framebuffer_u16*)malloc((size_t)num_render_pass_chunks_y * num_buffers * sizeof(framebuffer_u16));
+	if (!ctx->combined_row_buffer) { fprintf(stderr, "trender_ctx_init: out of memory (combined_row_buffer)\n"); return -1; }
+	for (int c = 0; c < num_render_pass_chunks_y; c++) {
+		int chunk_height = render_ctx_at(ctx, c, 0)->endy - render_ctx_at(ctx, c, 0)->starty;
+		for (int b = 0; b < num_buffers; b++)
+			*combined_row_at(ctx, b, c) = create_framebuffer_u16(cols, chunk_height);
+	}
+
+	int queue_capacity = (num_render_pass_chunks_y * num_render_pass_chunks_x) * (num_buffers + 2) + num_prim_pass_chunks + num_workers + 8;
+	scheduler_ctx_init(&ctx->sched, num_buffers,
+					   num_render_pass_chunks_y, num_render_pass_chunks_x, num_prim_pass_chunks,
 					   num_workers,
 	                   args->frames, queue_capacity);
 	return 0;
 }
 
 static inline void trender_ctx_destroy(trender_ctx_t* ctx) {
-	for (int c = 0; c < ctx->num_render_pass_chunks_y; c++) {
+	int num_render_ctx_cells = ctx->num_render_pass_chunks_y * ctx->num_render_pass_chunks_x;
+	for (int c = 0; c < num_render_ctx_cells; c++) {
 		free_rendering_ctx(&ctx->render_ctx[c]);
 	}
 	for (int c = 0; c < ctx->num_prim_pass_chunks; c++) {
@@ -514,6 +591,10 @@ static inline void trender_ctx_destroy(trender_ctx_t* ctx) {
 			free(ctx->gfx_out[c * ctx->num_buffers + b]);
 	free(ctx->gfx_out);
 	free(ctx->gfx_out_size);
+	for (int c = 0; c < ctx->num_render_pass_chunks_y; c++)
+		for (int b = 0; b < ctx->num_buffers; b++)
+			free_framebuffer_u16(combined_row_at(ctx, b, c));
+	free(ctx->combined_row_buffer);
 	free(ctx->render_ctx);
 	free(ctx->primitive_ctx);
 	free(ctx->gfx_ctx);
@@ -533,7 +614,7 @@ int worker_thread(void* arg) {
 		if (task.type == EXIT_LOOP) break;
 
 		if (task.type == PROCESS_PRIMITIVES) {
-			int c = task.chunk;
+			int c = task.chunk_y;
 			int num_prim_pass_chunks = ctx->sched.num_prim_pass_chunks;
 			int num_triangles = wa->mesh->attrib.num_face_num_verts;
 			int start_index = (num_triangles * c) / num_prim_pass_chunks;
@@ -543,21 +624,33 @@ int worker_thread(void* arg) {
 		}
 
 		if (task.type == RENDER_FRAME) {
-			int c   = task.chunk;
-			int buf = task.frame % ctx->num_buffers;
-			clear_pass(&ctx->render_ctx[c]);
+			rendering_ctx_t* rctx = render_ctx_at(ctx, task.chunk_y, task.chunk_x);
+			clear_pass(rctx);
 
 			for (int pc = 0; pc < ctx->sched.num_prim_pass_chunks; pc++) {
 				/* render_ctx/primitive_ctx are per chunk (configured once); gfx_ctx is per worker (reconfigured per task). */
-				render_mesh(wa->mesh, &ctx->render_ctx[c], &ctx->primitive_ctx[pc]);
+				render_mesh(wa->mesh, rctx, &ctx->primitive_ctx[pc]);
+			}
+		}
+
+		if (task.type == ENCODE_FRAME) {
+			int row = task.chunk_y;
+			int buf = task.frame % ctx->num_buffers;
+			framebuffer_u16* combined = combined_row_at(ctx, buf, row);
+			int chunk_height = combined->height;
+			for (int col = 0; col < ctx->num_render_pass_chunks_x; col++) {
+				rendering_ctx_t* rctx = render_ctx_at(ctx, row, col);
+				int chunk_width = rctx->endx - rctx->startx;
+				for (int y = 0; y < chunk_height; y++) {
+					memcpy(combined->data + y * combined->width + rctx->startx,
+					       rctx->output_buffer.data + y * chunk_width,
+					       (size_t)chunk_width * sizeof(uint16_t));
+				}
 			}
 
-			tio_gfx_params gp = ctx->chunk_gp[c];
+			tio_gfx_params gp = ctx->chunk_gp[row];
 			if (ctx->display_mode == TIO_GFX_BACKEND_KITTY) {
-				/* Cycle through K=NUM_IMAGES ids. Draw to id[frame%K] (idle — it was
-				   freed K-1 frames ago, so the displayed ids stay up during transmit),
-				   then free id[(frame-(K-1))%K], the image displayed K-1 frames back.
-				   The first K-1 frames have nothing old enough to delete yet. */
+				/* Cycle through K=NUM_IMAGES ids, split transmit/display double buffering — see header comment. */
 				int k   = TRENDER_KITTY_NUM_IMAGES;
 				int cur = TRENDER_KITTY_IMAGE_ID_BASE + (task.frame % k);
 				int prev = (task.frame >= k - 1)
@@ -574,16 +667,16 @@ int worker_thread(void* arg) {
 				parts = TIO_GFX_FULL;
 			} else {
 				parts = TIO_GFX_PAYLOAD;
-				if (c == 0)                                  parts |= TIO_GFX_HEADER;
-				if (c == ctx->num_render_pass_chunks_y - 1)  parts |= TIO_GFX_FOOTER;
+				if (row == 0)                                 parts |= TIO_GFX_HEADER;
+				if (row == ctx->num_render_pass_chunks_y - 1) parts |= TIO_GFX_FOOTER;
 			}
-			*gfx_out_size_at(ctx, buf, c) = (size_t)tio_gfx_generate(
+			*gfx_out_size_at(ctx, buf, row) = (size_t)tio_gfx_generate(
 				gfx_ctx_at(ctx, w),
-				ctx->render_ctx[c].output_buffer.data,
+				combined->data,
 				TIO_GFX_FMT_RGB565, parts,
-				gfx_out_at(ctx, buf, c), ctx->gfx_out_cap);
+				gfx_out_at(ctx, buf, row), ctx->gfx_out_cap);
 		}
-		
+
 		run_scheduler(&ctx->sched, task);
 	}
 	return 0;
@@ -604,8 +697,9 @@ static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio
 	handle_input(&sched->input_state);
 	render_params_t* rp0 = &sched->render_params_buf[0];
 	render_params_copy(rp0, &sched->input_state.render_params);
+	timer_start(&sched->timer);
 	for (int c = 0; c < ctx->num_prim_pass_chunks; c++) {
-		task_t task = { .type = PROCESS_PRIMITIVES, .frame = 0, .chunk = c, .render_params_ptr = rp0 };
+		task_t task = { .type = PROCESS_PRIMITIVES, .frame = 0, .chunk_y = c, .chunk_x = 0, .render_params_ptr = rp0 };
 		mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 	}
 
@@ -623,7 +717,7 @@ static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio
 		mpmc_queue_consume(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 		if (task.type == EXIT_LOOP) break;
 
-		int c   = task.chunk;
+		int c   = task.chunk_y;
 		int buf = task.frame % ctx->num_buffers;
 		if (c == 0) ctx->display_time = 0.0;
 
@@ -700,16 +794,21 @@ static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
 	}
 
 	/* ── Per-chunk render totals ─────────────────────────────────────────── */
+	int num_render_ctx_cells = ctx->num_render_pass_chunks_y * ctx->num_render_pass_chunks_x;
 	printf("Per-chunk render totals (ms):\r\n");
-	printf("  Chunk   %-12s %-12s %-12s\r\n", "Clear", "Raster", "Texture");
+	printf("  (x,y)    %-12s %-12s %-12s\r\n", "Clear", "Raster", "Texture");
 	double total_clear_time            = 0.0;
 	double total_rasterisation_time    = 0.0;
 	double total_texture_sampling_time = 0.0;
-	for (int c = 0; c < ctx->num_render_pass_chunks_y; c++) {
+	for (int c = 0; c < num_render_ctx_cells; c++) {
+		int x = c % ctx->num_render_pass_chunks_x;
+		int y = c / ctx->num_render_pass_chunks_x;
 		double cl = ctx->render_ctx[c].total_clear_time;
 		double ra = ctx->render_ctx[c].total_rasterisation_time;
 		double tx = ctx->render_ctx[c].total_texture_sampling_time;
-		printf("  %-7d %-12.2f %-12.2f %-12.2f\r\n", c, cl, ra, tx);
+		char coord[16];
+		snprintf(coord, sizeof(coord), "(%d,%d)", x, y);
+		printf("  %-8s %-12.2f %-12.2f %-12.2f\r\n", coord, cl, ra, tx);
 		total_clear_time            += cl;
 		total_rasterisation_time    += ra;
 		total_texture_sampling_time += tx;
@@ -717,13 +816,17 @@ static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
 
 	/* ── Per-chunk render averages ───────────────────────────────────────── */
 	printf("Per-chunk render averages (ms/frame):\r\n");
-	printf("  Chunk   %-12s %-12s %-12s\r\n", "Clear", "Raster", "Texture");
-	for (int c = 0; c < ctx->num_render_pass_chunks_y; c++) {
+	printf("  (x,y)    %-12s %-12s %-12s\r\n", "Clear", "Raster", "Texture");
+	for (int c = 0; c < num_render_ctx_cells; c++) {
+		int x = c % ctx->num_render_pass_chunks_x;
+		int y = c / ctx->num_render_pass_chunks_x;
 		double cl = ctx->render_ctx[c].total_clear_time;
 		double ra = ctx->render_ctx[c].total_rasterisation_time;
 		double tx = ctx->render_ctx[c].total_texture_sampling_time;
-		printf("  %-7d %-12.3f %-12.3f %-12.3f\r\n",
-		       c, cl * inv_f, ra * inv_f, tx * inv_f);
+		char coord[16];
+		snprintf(coord, sizeof(coord), "(%d,%d)", x, y);
+		printf("  %-8s %-12.3f %-12.3f %-12.3f\r\n",
+		       coord, cl * inv_f, ra * inv_f, tx * inv_f);
 	}
 
 	/* ── Per-worker generate table ───────────────────────────────────────── */
@@ -747,6 +850,7 @@ static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
 	printf("  generate_ms:           %0.2f\r\n", total_generate_ms);
 	printf("  frame_gen time:        %0.2f\r\n", total_frame_gen_time);
 	printf("  display time:          %0.2f\r\n", ctx->total_display_time);
+	printf("  actual frame gen:      %0.2f\r\n", ctx->sched.total_frame_gen_time);
 	printf("Overall averages (ms/frame):\r\n");
 	printf("  primitive time:        %0.3f\r\n", total_primitive_time        * inv_f);
 	printf("  clear time:            %0.3f\r\n", total_clear_time            * inv_f);
@@ -755,4 +859,5 @@ static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
 	printf("  generate_ms:           %0.3f\r\n", total_generate_ms           * inv_f);
 	printf("  frame_gen time:        %0.3f\r\n", total_frame_gen_time        * inv_f);
 	printf("  display time:          %0.3f\r\n", ctx->total_display_time     * inv_f);
+	printf("  actual frame gen:      %0.2f\r\n", ctx->sched.total_frame_gen_time * inv_f);
 }

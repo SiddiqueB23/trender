@@ -47,6 +47,7 @@ void render_params_copy(render_params_t* dest, render_params_t* src) {
 }
 
 typedef struct {
+	int startx, endx;
 	int starty, endy;
 	int width, height;
 	int chunk_index;   /* which output chunk this ctx renders; tested against hint_mask bits */
@@ -60,15 +61,17 @@ typedef struct {
 	render_params_t params;
 } rendering_ctx_t;
 
-rendering_ctx_t create_rendering_ctx(int width, int height, int starty, int endy) {
+rendering_ctx_t create_rendering_ctx(int width, int height, int startx, int endx, int starty, int endy) {
 	rendering_ctx_t ctx;
+	int buffer_width = endx - startx;
 	int buffer_height = endy - starty;
-	int buffer_width = width;
 	ctx.index_buffer = create_framebuffer_i32(buffer_width, buffer_height);
 	ctx.depth_buffer = create_framebuffer_f(buffer_width, buffer_height);
 	ctx.output_buffer = create_framebuffer_u16(buffer_width, buffer_height);
 	ctx.height = height;
 	ctx.width = width;
+	ctx.startx = startx;
+	ctx.endx = endx;
 	ctx.starty = starty;
 	ctx.endy = endy;
 	ctx.chunk_index = 0;
@@ -290,6 +293,7 @@ static inline __m256 dot_product_3vec8f(__m256 a0, __m256 a1, __m256 a2, __m256 
 void rasterize_triangle_avx2_texture_index_only(processed_triangle_t* triangle, rendering_ctx_t* ctx) {
 	framebuffer_i32* index_buffer = &ctx->index_buffer;
 	framebuffer_f* depth_buffer = &ctx->depth_buffer;
+	int startx = ctx->startx, endx = ctx->endx;
 	int starty = ctx->starty, endy = ctx->endy;
 	int width = ctx->width, height = ctx->height;
 
@@ -337,8 +341,8 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t* triangle, 
 	int maxy = (max_int(max_int(Y1, Y2), Y3) + (fixed_point_scale - 1)) / fixed_point_scale;
 	minx = minx - minx % 8;
 	maxx = (maxx + 7) - (maxx + 7) % 8;
-	minx = clamp_int(minx, 0, width - 1);
-	maxx = clamp_int(maxx, 0, width - 1);
+	minx = max_int(minx, startx);
+	maxx = min_int(maxx, endx - 1);
 	// miny = clamp_int(miny, starty, endy - 1);
 	// maxy = clamp_int(maxy, starty, endy - 1);
 	miny = max_int(miny, starty);
@@ -404,8 +408,8 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t* triangle, 
 
 	for (int y = miny; y <= maxy; y += 1)
 	{
-		index_buffer_ptr = index_buffer->data + ((y - starty) * width + minx);
-		depth_buffer_ptr = depth_buffer->data + ((y - starty) * width + minx);
+		index_buffer_ptr = index_buffer->data + ((y - starty) * index_buffer->width + (minx - startx));
+		depth_buffer_ptr = depth_buffer->data + ((y - starty) * index_buffer->width + (minx - startx));
 
 		__m256i cx1_vec = cy1_vec;
 		__m256i cx2_vec = cy2_vec;
@@ -537,31 +541,36 @@ typedef struct {
 	monotonic_timer_t     timer;
 	double                total_primitive_time;
 	/* chunk layout, for computing hint_mask chunk-membership bits */
-	int                   num_chunks;
+	int                   num_chunks_y, num_chunks_x;
 	int                   width, height;
-	int*                  chunk_starty;  /* [num_chunks] */
-	int*                  chunk_endy;    /* [num_chunks] */
+	int*                  chunk_starty;  /* [num_chunks_y] */
+	int*                  chunk_endy;    /* [num_chunks_y] */
+	int*                  chunk_startx;  /* [num_chunks_x] */
+	int*                  chunk_endx;    /* [num_chunks_x] */
 	/* Hints for raster pass */
 	int			 		  hint_bitarray_size;
 	uint64_t*             requires_clipping_hint;
-	uint64_t*			  chunk_hints;	
+	uint64_t*			  chunk_hints;	/* [num_chunks_y * num_chunks_x * hint_bitarray_size], flat-indexed (y*num_chunks_x+x)*hint_bitarray_size */
 } primitive_pass_ctx_t;
 
-static inline primitive_pass_ctx_t create_primitive_pass_ctx(int num_triangles, int num_chunks) {
+static inline primitive_pass_ctx_t create_primitive_pass_ctx(int num_triangles, int num_chunks_y, int num_chunks_x) {
 	primitive_pass_ctx_t ctx;
 	ctx.num_triangles = num_triangles;
 	ctx.triangles = (processed_triangle_t*)malloc((size_t)num_triangles * sizeof(processed_triangle_t));
 	ctx.total_primitive_time = 0.0;
 
-	ctx.num_chunks = num_chunks;
+	ctx.num_chunks_y = num_chunks_y;
+	ctx.num_chunks_x = num_chunks_x;
 	ctx.width = 0;
 	ctx.height = 0;
-	ctx.chunk_starty = (int*)malloc((size_t)num_chunks * sizeof(int));
-	ctx.chunk_endy   = (int*)malloc((size_t)num_chunks * sizeof(int));
+	ctx.chunk_starty = (int*)malloc((size_t)num_chunks_y * sizeof(int));
+	ctx.chunk_endy   = (int*)malloc((size_t)num_chunks_y * sizeof(int));
+	ctx.chunk_startx = (int*)malloc((size_t)num_chunks_x * sizeof(int));
+	ctx.chunk_endx   = (int*)malloc((size_t)num_chunks_x * sizeof(int));
 
 	ctx.hint_bitarray_size 		= (num_triangles / 64 + 1);
 	ctx.requires_clipping_hint 	= (uint64_t*)calloc((size_t)ctx.hint_bitarray_size, sizeof(uint64_t));
-	ctx.chunk_hints 			= (uint64_t*)calloc((size_t)(ctx.hint_bitarray_size * num_chunks), sizeof(uint64_t));
+	ctx.chunk_hints 			= (uint64_t*)calloc((size_t)(ctx.hint_bitarray_size * num_chunks_y * num_chunks_x), sizeof(uint64_t));
 	return ctx;
 }
 
@@ -569,6 +578,8 @@ static inline void free_primitive_pass_ctx(primitive_pass_ctx_t* ctx) {
 	free(ctx->triangles);
 	free(ctx->chunk_starty);
 	free(ctx->chunk_endy);
+	free(ctx->chunk_startx);
+	free(ctx->chunk_endx);
 	free(ctx->requires_clipping_hint);
 	free(ctx->chunk_hints);
 }
@@ -580,8 +591,9 @@ static inline int triangle_requires_clipping(processed_triangle_t tri) {
 }
 
 static inline void set_hint_mask(processed_triangle_t* triangle, primitive_pass_ctx_t* ctx, int idx) {
+	int num_cells = ctx->num_chunks_y * ctx->num_chunks_x;
 	if (triangle_is_fully_clipped(*triangle)) {
-		for(int c=0;c<ctx->num_chunks;c++) {
+		for (int c = 0; c < num_cells; c++) {
 			ctx->chunk_hints[c * ctx->hint_bitarray_size + idx/64] &= ~((uint64_t)1ULL << (idx % 64));
 		}
 		return;
@@ -594,13 +606,21 @@ static inline void set_hint_mask(processed_triangle_t* triangle, primitive_pass_
 	viewport_transform(&triangle->v0, ctx->width, ctx->height, &x0, &y0);
 	viewport_transform(&triangle->v1, ctx->width, ctx->height, &x1, &y1);
 	viewport_transform(&triangle->v2, ctx->width, ctx->height, &x2, &y2);
+	float xmin_f = fminf(x0, fminf(x1, x2));
+	float xmax_f = fmaxf(x0, fmaxf(x1, x2));
 	float ymin_f = fminf(y0, fminf(y1, y2));
 	float ymax_f = fmaxf(y0, fmaxf(y1, y2));
+	int xmin = (int)floorf(xmin_f);
+	int xmax = (int)ceilf(xmax_f);
 	int ymin = (int)floorf(ymin_f);
 	int ymax = (int)ceilf(ymax_f);
-	for (int c = 0; c < ctx->num_chunks; c++) {
-		if (ymin < ctx->chunk_endy[c] && ymax > ctx->chunk_starty[c])
-			ctx->chunk_hints[c*ctx->hint_bitarray_size + idx/64] |= ((uint64_t)1ULL << (idx % 64));
+	for (int y = 0; y < ctx->num_chunks_y; y++) {
+		if (ymin >= ctx->chunk_endy[y] || ymax <= ctx->chunk_starty[y]) continue;
+		for (int x = 0; x < ctx->num_chunks_x; x++) {
+			if (xmin >= ctx->chunk_endx[x] || xmax <= ctx->chunk_startx[x]) continue;
+			int c = y * ctx->num_chunks_x + x;
+			ctx->chunk_hints[c * ctx->hint_bitarray_size + idx/64] |= ((uint64_t)1ULL << (idx % 64));
+		}
 	}
 }
 
