@@ -625,6 +625,8 @@ int worker_thread(void* arg) {
 
 		if (task.type == RENDER_FRAME) {
 			rendering_ctx_t* rctx = render_ctx_at(ctx, task.chunk_y, task.chunk_x);
+			int buf = task.frame % ctx->num_buffers;
+			rctx->output_start = combined_row_at(ctx, buf, task.chunk_y)->data + rctx->startx;
 			clear_pass(rctx);
 
 			for (int pc = 0; pc < ctx->sched.num_prim_pass_chunks; pc++) {
@@ -637,16 +639,6 @@ int worker_thread(void* arg) {
 			int row = task.chunk_y;
 			int buf = task.frame % ctx->num_buffers;
 			framebuffer_u16* combined = combined_row_at(ctx, buf, row);
-			int chunk_height = combined->height;
-			for (int col = 0; col < ctx->num_render_pass_chunks_x; col++) {
-				rendering_ctx_t* rctx = render_ctx_at(ctx, row, col);
-				int chunk_width = rctx->endx - rctx->startx;
-				for (int y = 0; y < chunk_height; y++) {
-					memcpy(combined->data + y * combined->width + rctx->startx,
-					       rctx->output_buffer.data + y * chunk_width,
-					       (size_t)chunk_width * sizeof(uint16_t));
-				}
-			}
 
 			tio_gfx_params gp = ctx->chunk_gp[row];
 			if (ctx->display_mode == TIO_GFX_BACKEND_KITTY) {

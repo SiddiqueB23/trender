@@ -57,7 +57,7 @@ typedef struct {
 	monotonic_timer_t timer;
 	framebuffer_i32 index_buffer;
 	framebuffer_f depth_buffer;
-	framebuffer_u16 output_buffer;
+	uint16_t* output_start; /* pointer into the shared combined-row buffer at this chunk's (startx, row); stride == width (full frame) */
 	render_params_t params;
 } rendering_ctx_t;
 
@@ -67,7 +67,7 @@ rendering_ctx_t create_rendering_ctx(int width, int height, int startx, int endx
 	int buffer_height = endy - starty;
 	ctx.index_buffer = create_framebuffer_i32(buffer_width, buffer_height);
 	ctx.depth_buffer = create_framebuffer_f(buffer_width, buffer_height);
-	ctx.output_buffer = create_framebuffer_u16(buffer_width, buffer_height);
+	ctx.output_start = NULL;
 	ctx.height = height;
 	ctx.width = width;
 	ctx.startx = startx;
@@ -84,7 +84,6 @@ rendering_ctx_t create_rendering_ctx(int width, int height, int startx, int endx
 void free_rendering_ctx(rendering_ctx_t* ctx) {
 	free_framebuffer_i32(&ctx->index_buffer);
 	free_framebuffer_f(&ctx->depth_buffer);
-	free_framebuffer_u16(&ctx->output_buffer);
 }
 
 /* =========================================================== */
@@ -492,19 +491,22 @@ void rasterize_triangle_avx2_texture_index_only(processed_triangle_t* triangle, 
 
 void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, texture_atlas_t* atlas) {
 	framebuffer_i32* index_buffer = &ctx->index_buffer;
-	framebuffer_u16* output_buffer = &ctx->output_buffer;
 	int width = index_buffer->width, height = index_buffer->height;
-	int length = width * height;
 	int32_t* ib_data = index_buffer->data;
-	uint16_t* fb_data = output_buffer->data;
 	uint16_t* atlas_data = (uint16_t*)atlas->data;
-	for (int i = 0; i < length; i += 1) {
-		int index = ib_data[i];
-		if (index < 0 || index >= atlas->length) {
-			fb_data[i] = convert_8r8g8b8a_to_5r6g5b(255, 0, 255);
-			continue;
+	uint16_t* out_row = ctx->output_start;
+	int ib_i = 0;
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			int index = ib_data[ib_i];
+			if (index < 0 || index >= atlas->length) {
+				out_row[x] = convert_8r8g8b8a_to_5r6g5b(255, 0, 255);
+			} else {
+				out_row[x] = atlas_data[index];
+			}
+			ib_i++;
 		}
-		fb_data[i] = atlas_data[index];
+		out_row += ctx->width;
 	}
 }
 
@@ -642,7 +644,6 @@ void primitive_pass(mesh_t* mesh, primitive_pass_ctx_t* ctx, int start_index, in
 void clear_pass(rendering_ctx_t* ctx) {
 	timer_start(&ctx->timer);
 	clear_framebuffer_f(&ctx->depth_buffer, far_plane);
-	clear_framebuffer_u16(&ctx->output_buffer, (uint16_t)0);
 	clear_framebuffer_i32(&ctx->index_buffer, (int32_t)0);
 	double clear_time = timer_elapsed_ms(&ctx->timer);
 	ctx->total_clear_time += clear_time;
