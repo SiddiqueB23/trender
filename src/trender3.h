@@ -362,8 +362,8 @@ static inline size_t* gfx_out_size_at(trender_ctx_t* ctx, int b, int c) {
 static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, int cols,
 	const cli_args_t* args) {
 	int num_workers                            = args->threads;
-	int num_render_pass_chunks_y               = num_workers * 4; /* TODO: independent CLI flag later */
-	int num_render_pass_chunks_x               = num_workers * 4;
+	int num_render_pass_chunks_y               = num_workers * 1; /* TODO: independent CLI flag later */
+	int num_render_pass_chunks_x               = num_workers * 1;
 	int num_prim_pass_chunks                   = num_workers;
 	int num_buffers                            = args->buffers;
 	tio_gfx_backend display_mode               = args->display_mode;
