@@ -2,18 +2,11 @@
 #include "framebuffer_4i8.h"
 #include "framebuffer_f.h"
 #include "raycast.h"
-#include "trender_input.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 tio_ctx_t tio_ctx;
-
-int keep_running = 1;
-omp_lock_t input_state_lock;
-render_params_t render_params_global;
-
-int mousex = 0, mousey = 0;
 
 void get_bounding_box(mesh_t* mesh, float* minx, float* miny, float* minz, float* maxx, float* maxy, float* maxz) {
 	*minx = FLT_MAX;
@@ -197,7 +190,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	init_input(&input_state, &tio_ctx, args.interactive, args.rotate, cols, rows);
-	render_params_copy(&render_params_global, &input_state.render_params);
 
 	if (args.interactive) {
 		printf("\x1b[2J");   // Clear screen
@@ -205,106 +197,22 @@ int main(int argc, char* argv[]) {
 	}
 	printf("\x1b[?25l"); // Hide cursor
 	fflush(stdout);
-	
+
 	trender_ctx_t ctx;
-	if (trender_ctx_init(&ctx, rows, cols, &args) != 0)
+	if (trender_ctx_init(&ctx, &mesh, rows, cols, &args) != 0)
 		return 1;
-	
-	omp_init_lock(&input_state_lock);
+
+	/* trender_ctx_init may align rows down to a multiple of the chunk height. */
+	rows = ctx.rows;
 
 	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
-	
-	double total_processing_time = 0.0;
-	double processing_time = 0.0;
-	double previous_end_time = timer_elapsed_ms(&timer_whole);
-	double frame_time = 0.0;
-	double total_frame_time = 0.0;
-	double current_end_time = 0.0;
-	
-	// int hit_triangle_idx = -1;
-	
-#pragma omp parallel num_threads(args.threads) default(shared)
-	{
-		int thread_id = omp_get_thread_num();
-		int num_frame_counter = args.frames;
-		int thread_keeps_running = 1;
-		if (ctx.num_threads == 1) {
-			render_params_copy(&ctx.render_ctx[0].params, &render_params_global);
-		}else if(thread_id >= 1){
-			render_params_copy(&ctx.render_ctx[thread_id - 1].params, &render_params_global);
-		}
-		trender_generate_frame(&ctx, &mesh, thread_id, 0);
-#pragma omp barrier
-		if (ctx.num_threads >= 2 && thread_id == 0) {
-			for (int i = 0; i < ctx.num_threads - 1; i++) {
-				set_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), thread_id, ctx.front[i], i);
-			}
-		}
-#pragma omp barrier
-		while (num_frame_counter--) {
-			if(thread_id == 0){
-				handle_input(&input_state);
-				thread_keeps_running = !input_state.quit_requested;
 
-				omp_set_lock(&input_state_lock);
-				render_params_copy(&render_params_global, &input_state.render_params);
-				keep_running = thread_keeps_running;
-				omp_unset_lock(&input_state_lock);
-			}
-			
-			if (ctx.num_threads == 1) {
-				render_params_copy(&ctx.render_ctx[0].params, &render_params_global);
-			}else if(thread_id >= 1){
-				omp_set_lock(&input_state_lock);
-				thread_keeps_running = keep_running;
-				render_params_copy(&ctx.render_ctx[thread_id - 1].params, &render_params_global);
-				omp_unset_lock(&input_state_lock);
-			}
+	trender_loop(&ctx, &mesh, &tio_ctx, &input_state);
 
-			if (thread_keeps_running == 0) {
-				break;
-			}
-
-			trender_generate_frame(&ctx, &mesh, thread_id, 1);
-			if (thread_id == 0) {
-				trender_display_frame(&ctx, &tio_ctx);
-
-				current_end_time = timer_elapsed_ms(&timer_whole);
-				frame_time = current_end_time - previous_end_time;
-				previous_end_time = current_end_time;
-				total_frame_time += frame_time;
-
-				processing_time = fmaxf(0.0f, frame_time - ctx.display_time);
-				total_processing_time += processing_time;
-
-				if (args.interactive) {
-					printf("\x1b[H");    // Move cursor to home
-					printf("\r\n");
-					printf("Screen size: %d rows, %d cols, %d pixels          \r\n", rows, cols, rows * cols);
-					printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", input_state.camera_x, input_state.camera_y, input_state.camera_z);
-					printf("Processing:    %0.2f                              \r\n", processing_time);
-					printf("Display:       %0.2f                              \r\n", ctx.display_time);
-					printf("Frame time:    %0.2f                              \r\n", frame_time);
-					fflush(stdout);
-				}
-			}
-		}
-		if (thread_id == 0) {
-			if (ctx.num_threads == 2) {
-				unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[0], 0), 0, ctx.front[0], 0);
-			}
-			else if (ctx.num_threads >= 3) {
-				for (int i = 0; i < ctx.num_threads - 1; i++) {
-					unset_lock_with_debug(buffer_lock_at(&ctx, ctx.front[i], i), 0, ctx.front[i], i);
-				}
-			}
-		}
-
-		if (ctx.num_threads >= 2 && thread_id >= 1) {
-			unset_lock_with_debug(buffer_lock_at(&ctx, ctx.back[thread_id - 1], thread_id - 1), thread_id, ctx.back[thread_id - 1], thread_id - 1);
-		}
-	}
+	double whole_time            = timer_elapsed_ms(&timer_whole);
+	double total_frame_time      = whole_time;
+	double total_processing_time = fmax(0.0, whole_time - ctx.total_display_time);
 
 	/* Move cursor below the rendered image so the shell prompt appears cleanly */
 	int cursor_row;
@@ -335,11 +243,11 @@ int main(int argc, char* argv[]) {
 		printf("Processing:    %0.2f\r\n", total_processing_time / (float)args.frames);
 		printf("Display:       %0.2f\r\n", ctx.total_display_time / (float)args.frames);
 		printf("Frame time:    %0.2f\r\n", total_frame_time / (float)args.frames);
-		double whole_time = timer_elapsed_ms(&timer_whole);
 		trender_print_stats(&ctx, args.frames);
 		printf("Total time:            %0.2f\r\n", whole_time);
 
 	}
 
+	trender_ctx_destroy(&ctx);
 	return 0;
 }
