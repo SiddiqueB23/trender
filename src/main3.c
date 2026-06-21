@@ -208,7 +208,7 @@ int main(int argc, char* argv[]) {
 	monotonic_timer_t timer_whole;
 	timer_start(&timer_whole);
 
-	trender_loop(&ctx, &mesh, &tio_ctx, &input_state, &args);
+	trender_loop(&ctx, &mesh, &tio_ctx, &input_state);
 
 	double whole_time            = timer_elapsed_ms(&timer_whole);
 	double total_frame_time      = whole_time;

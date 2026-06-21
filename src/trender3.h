@@ -506,6 +506,7 @@ static inline void trender_ctx_destroy(trender_ctx_t* ctx) {
 typedef struct { trender_ctx_t* ctx; mesh_t* mesh; int id; } worker_arg_t;
 
 void worker_thread_process_primitives(task_t* task, worker_arg_t* wa, int* override_next_task) {
+	(void)override_next_task;
 	trender_ctx_t* ctx = wa->ctx;
 
 	int c = task->chunk_y;
@@ -521,24 +522,28 @@ void worker_thread_process_primitives(task_t* task, worker_arg_t* wa, int* overr
 	int chunk_y = task->chunk_y;
     int frame   = task->frame;
     int num_x   = sched->num_render_pass_chunks_x;
+    int num_y   = sched->num_render_pass_chunks_y;
 	sched->primitive_chunk_procesed[chunk_y] = true;
 	if(frame_rasterisable(sched)) {
 		reset_rasterisable(sched);
-		for (int i = 0; i < num_x; i++) {
-			task_t render_task = {
-				.type = RENDER_FRAME,
-				.frame = frame,
-				.chunk_y = 0,
-				.chunk_x = i,
-				.render_params_ptr = NULL,
-			};
-			mpmc_queue_produce(&sched->parallel_work_queue, &render_task, MPMC_QUEUE_WAIT_INFINITE);
+		for (int i = 0; i < num_y; i++) {
+			for (int j = 0; j < num_x; j++) {
+				task_t render_task = {
+					.type = RENDER_FRAME,
+					.frame = frame,
+					.chunk_y = i,
+					.chunk_x = j,
+					.render_params_ptr = NULL,
+				};
+				mpmc_queue_produce(&sched->parallel_work_queue, &render_task, MPMC_QUEUE_WAIT_INFINITE);
+			}
 		}
 	}
 	thread_mutex_unlock(&sched->state_mutex);
 }
 
 void worker_thread_render_frame(task_t* task, worker_arg_t* wa, int* override_next_task) {
+	(void)override_next_task;
 	trender_ctx_t* ctx = wa->ctx;
 
 	rendering_ctx_t* rctx = render_ctx_at(ctx, task->chunk_y, task->chunk_x);
@@ -573,18 +578,18 @@ void worker_thread_render_frame(task_t* task, worker_arg_t* wa, int* override_ne
 			.render_params_ptr = NULL,
 		};
 		mpmc_queue_produce(&sched->parallel_work_queue, &encode_task, MPMC_QUEUE_WAIT_INFINITE);
-		if (chunk_y + 1 < num_y) {
-			for (int i = 0; i < num_x; i++) {
-				task_t render_task = {
-					.type = RENDER_FRAME,
-					.frame = frame,
-					.chunk_y = chunk_y + 1,
-					.chunk_x = i,
-					.render_params_ptr = NULL,
-				};
-				mpmc_queue_produce(&sched->parallel_work_queue, &render_task, MPMC_QUEUE_WAIT_INFINITE);
-			}
-		}
+		// if (chunk_y + 1 < num_y) {
+		// 	for (int i = 0; i < num_x; i++) {
+		// 		task_t render_task = {
+		// 			.type = RENDER_FRAME,
+		// 			.frame = frame,
+		// 			.chunk_y = chunk_y + 1,
+		// 			.chunk_x = i,
+		// 			.render_params_ptr = NULL,
+		// 		};
+		// 		mpmc_queue_produce(&sched->parallel_work_queue, &render_task, MPMC_QUEUE_WAIT_INFINITE);
+		// 	}
+		// }
 	}
 	thread_mutex_unlock(&sched->state_mutex);
 }
@@ -763,7 +768,7 @@ int worker_thread(void* arg) {
 		int override_next_task = 1;
 		while (override_next_task) {
 			override_next_task = 0;
-			task_t current_task = task;
+			// task_t current_task = task;
 			// print_task(&current_task, 0);
 
 			switch (task.type) {
@@ -792,7 +797,7 @@ int worker_thread(void* arg) {
 /* Spins up worker threads, runs the display loop on the calling thread, then joins.
  * input_state must be fully initialised (matrices, autofit, etc.). */
 static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio,
-                                const input_state_t* input_state, const cli_args_t* args) {
+                                const input_state_t* input_state) {
 	scheduler_ctx_t* sched = &ctx->sched;
 	sched->input_state = *input_state;
 	ctx->tio = tio;
