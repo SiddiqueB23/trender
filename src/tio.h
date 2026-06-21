@@ -196,7 +196,7 @@ void tio_init(tio_ctx_t* ctx) {
 	ctx->ofd = STDOUT_FILENO;
 	input_processing_buffer_init(&ctx->ipb);
 	enable_raw_mode(ctx);
-	enable_mouse_reporting();
+	// enable_mouse_reporting();
 }
 
 void tio_destroy(tio_ctx_t* ctx) {

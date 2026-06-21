@@ -76,6 +76,19 @@ typedef struct {
     render_params_t* render_params_ptr;
 } task_t;
 
+void print_task(task_t *task, int start) {
+	static const char* task_type_names[] = {
+		"PROCESS_PRIMITIVES", "RENDER_FRAME", "ENCODE_FRAME", "DISPLAY_FRAME", "EXIT_LOOP",
+	};
+	static const char* start_end[] = {
+		"START: ", "END: ",
+	};
+	
+	printf("%s %s frame=%d chunk_y=%d chunk_x=%d\n",
+	       start_end[start % 2] ,task_type_names[task->type], task->frame, task->chunk_y, task->chunk_x);
+	fflush(stdout);
+}
+
 typedef struct {
     /* configuration */
     int num_buffers;
@@ -92,6 +105,7 @@ typedef struct {
     bool*           rendering_completed;
     /* encode and display completion state — flat [num_buffers*2 × num_render_pass_chunks_y] */
     bool*           encode_completed;
+    bool*           display_pending;
     bool*           display_completed;
     thread_mutex_t  state_mutex;
 
@@ -103,8 +117,6 @@ typedef struct {
     /* queues + backing buffers — [queue_capacity] each */
     mpmc_queue_t  parallel_work_queue;
     task_t*       parallel_work_queue_buf;
-    mpmc_queue_t  display_queue;
-    task_t*       display_queue_buf;
 
     /* scheduler cursors */
     int frame_to_be_displayed;
@@ -132,15 +144,14 @@ void scheduler_ctx_init(scheduler_ctx_t* sched, int num_buffers,
     int nb2 = num_buffers * 2;
     sched->rendering_completed       = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y * num_render_pass_chunks_x), sizeof(bool));
     sched->encode_completed          = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y), sizeof(bool));
+    sched->display_pending           = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y), sizeof(bool));
     sched->display_completed         = (bool*)calloc((size_t)(nb2 * num_render_pass_chunks_y), sizeof(bool));
-    sched->primitive_chunk_procesed = (bool*)calloc((size_t)(num_prim_pass_chunks), sizeof(bool));
+    sched->primitive_chunk_procesed  = (bool*)calloc((size_t)(num_prim_pass_chunks), sizeof(bool));
     sched->render_params_buf         = (render_params_t*)calloc((size_t)nb2, sizeof(render_params_t));
     thread_mutex_init(&sched->state_mutex);
 
     sched->parallel_work_queue_buf = (task_t*)malloc((size_t)queue_capacity * sizeof(task_t));
-    sched->display_queue_buf       = (task_t*)malloc((size_t)queue_capacity * sizeof(task_t));
     mpmc_queue_init(&sched->parallel_work_queue, queue_capacity, sizeof(task_t), sched->parallel_work_queue_buf);
-    mpmc_queue_init(&sched->display_queue,       queue_capacity, sizeof(task_t), sched->display_queue_buf);
 
     /* mark back half of display slots as already done (frames that haven't existed yet) */
     for (int i = num_buffers; i < nb2; i++)
@@ -153,10 +164,10 @@ void scheduler_ctx_init(scheduler_ctx_t* sched, int num_buffers,
 void scheduler_ctx_destroy(scheduler_ctx_t* sched) {
     free(sched->rendering_completed);
     free(sched->encode_completed);
+    free(sched->display_pending);
     free(sched->display_completed);
     free(sched->render_params_buf);
     free(sched->parallel_work_queue_buf);
-    free(sched->display_queue_buf);
     thread_mutex_term(&sched->state_mutex);
 }
 
@@ -164,7 +175,6 @@ void emit_exit_tasks(scheduler_ctx_t* sched) {
     task_t task = { .type = EXIT_LOOP, .frame = 0, .chunk_y = 0, .chunk_x = 0, .render_params_ptr = NULL };
     for (int i = 0; i < sched->num_workers; i++)
         mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
-    mpmc_queue_produce(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 }
 
 bool frame_rasterisable(scheduler_ctx_t* sched) {
@@ -459,7 +469,7 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 			*combined_row_at(ctx, b, c) = create_framebuffer_u16(cols, chunk_height);
 	}
 
-	int queue_capacity = (num_render_pass_chunks_y * num_render_pass_chunks_x) * (num_buffers + 2) + num_prim_pass_chunks + num_workers + 8;
+	int queue_capacity = (num_render_pass_chunks_y * num_render_pass_chunks_x) * (num_buffers + 2) + num_prim_pass_chunks + num_workers + 8 + 256;
 	scheduler_ctx_init(&ctx->sched, num_buffers,
 					   num_render_pass_chunks_y, num_render_pass_chunks_x, num_prim_pass_chunks,
 					   num_workers,
@@ -495,7 +505,7 @@ static inline void trender_ctx_destroy(trender_ctx_t* ctx) {
 
 typedef struct { trender_ctx_t* ctx; mesh_t* mesh; int id; } worker_arg_t;
 
-void worker_thread_process_primitives(task_t* task, worker_arg_t* wa) {
+void worker_thread_process_primitives(task_t* task, worker_arg_t* wa, int* override_next_task) {
 	trender_ctx_t* ctx = wa->ctx;
 
 	int c = task->chunk_y;
@@ -515,20 +525,20 @@ void worker_thread_process_primitives(task_t* task, worker_arg_t* wa) {
 	if(frame_rasterisable(sched)) {
 		reset_rasterisable(sched);
 		for (int i = 0; i < num_x; i++) {
-			task_t task = {
+			task_t render_task = {
 				.type = RENDER_FRAME,
 				.frame = frame,
 				.chunk_y = 0,
 				.chunk_x = i,
 				.render_params_ptr = NULL,
 			};
-			mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
+			mpmc_queue_produce(&sched->parallel_work_queue, &render_task, MPMC_QUEUE_WAIT_INFINITE);
 		}
 	}
 	thread_mutex_unlock(&sched->state_mutex);
 }
 
-void worker_thread_render_frame(task_t* task, worker_arg_t* wa) {
+void worker_thread_render_frame(task_t* task, worker_arg_t* wa, int* override_next_task) {
 	trender_ctx_t* ctx = wa->ctx;
 
 	rendering_ctx_t* rctx = render_ctx_at(ctx, task->chunk_y, task->chunk_x);
@@ -565,21 +575,21 @@ void worker_thread_render_frame(task_t* task, worker_arg_t* wa) {
 		mpmc_queue_produce(&sched->parallel_work_queue, &encode_task, MPMC_QUEUE_WAIT_INFINITE);
 		if (chunk_y + 1 < num_y) {
 			for (int i = 0; i < num_x; i++) {
-				task_t task = {
+				task_t render_task = {
 					.type = RENDER_FRAME,
 					.frame = frame,
 					.chunk_y = chunk_y + 1,
 					.chunk_x = i,
 					.render_params_ptr = NULL,
 				};
-				mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
+				mpmc_queue_produce(&sched->parallel_work_queue, &render_task, MPMC_QUEUE_WAIT_INFINITE);
 			}
 		}
 	}
 	thread_mutex_unlock(&sched->state_mutex);
 }
 
-void worker_thread_encode_frame(task_t* task, worker_arg_t* wa) {
+void worker_thread_encode_frame(task_t* task, worker_arg_t* wa, int* override_next_task) {
 	trender_ctx_t* ctx = wa->ctx;
 	int w = wa->id;
 
@@ -623,23 +633,17 @@ void worker_thread_encode_frame(task_t* task, worker_arg_t* wa) {
 	int num_y   = sched->num_render_pass_chunks_y;
 	thread_mutex_lock(&sched->state_mutex);
 	sched->encode_completed[buffer * num_y + chunk_y] = true;
-	int buf_disp = sched->frame_to_be_displayed % nb2;
-	while (sched->frame_to_be_displayed == frame &&
-			sched->encode_completed[buf_disp * num_y + sched->row_to_be_displayed]) {
-		task_t task = {
+	sched->display_pending[buffer * num_y + chunk_y] = true;
+	if (sched->frame_to_be_displayed == frame && sched->row_to_be_displayed == chunk_y) {
+		task_t display_task = {
 			.type = DISPLAY_FRAME,
 			.frame = sched->frame_to_be_displayed,
 			.chunk_y = sched->row_to_be_displayed,
 			.chunk_x = 0,
 			.render_params_ptr = NULL,
 		};
-		mpmc_queue_produce(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
-		sched->row_to_be_displayed++;
-		if (sched->row_to_be_displayed >= num_y) {
-			sched->total_frame_gen_time += timer_elapsed_ms(&sched->timer);
-			sched->row_to_be_displayed = 0;
-			sched->frame_to_be_displayed++;
-		}
+		*task = display_task;
+		*override_next_task = 1;
 	}
 	int next_frame = frame + 1;
 	if (frame_queueable(sched, next_frame) && next_frame < sched->num_frames) {
@@ -653,22 +657,21 @@ void worker_thread_encode_frame(task_t* task, worker_arg_t* wa) {
 		} else {
 			timer_start(&sched->timer);
 			for (int i = 0; i < sched->num_prim_pass_chunks; i++) {
-				task_t task = {
+				task_t primitive_task = {
 					.type = PROCESS_PRIMITIVES,
 					.frame = next_frame,
 					.chunk_y = i,
 					.chunk_x = 0,
 					.render_params_ptr = rp,
 				};
-				mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
+				mpmc_queue_produce(&sched->parallel_work_queue, &primitive_task, MPMC_QUEUE_WAIT_INFINITE);
 			}
 		}
 	}
 	thread_mutex_unlock(&sched->state_mutex);
 }
 
-
-void worker_thread_display_frame(task_t* task, worker_arg_t* wa) {
+void worker_thread_display_frame(task_t* task, worker_arg_t* wa, int* override_next_task) {
 	trender_ctx_t* ctx = wa->ctx;
 	tio_ctx_t* tio = ctx->tio;
 
@@ -685,15 +688,9 @@ void worker_thread_display_frame(task_t* task, worker_arg_t* wa) {
 		ctx->total_display_time += ctx->display_time;
 
 		if (ctx->sched.input_state.interactive) {
-			// thread_mutex_lock(&sched->state_mutex);
-			// float cam_x = sched->input_state.camera_x;
-			// float cam_y = sched->input_state.camera_y;
-			// float cam_z = sched->input_state.camera_z;
-			// thread_mutex_unlock(&sched->state_mutex);
 			printf("\x1b[H");
 			printf("\r\n");
 			printf("Screen size: %d rows, %d cols, %d pixels          \r\n", ctx->rows, ctx->cols, ctx->rows * ctx->cols);
-			// printf("Camera position: (%0.2f, %0.2f, %0.2f)            \r\n", cam_x, cam_y, cam_z);
 			printf("Display:       %0.2f                              \r\n", ctx->display_time);
 			fflush(stdout);
 		}
@@ -721,16 +718,36 @@ void worker_thread_display_frame(task_t* task, worker_arg_t* wa) {
 		} else {
 			timer_start(&sched->timer);
 			for (int i = 0; i < sched->num_prim_pass_chunks; i++) {
-				task_t task = {
+				task_t primitive_task = {
 					.type = PROCESS_PRIMITIVES,
 					.frame = next_frame,
 					.chunk_y = i,
 					.chunk_x = 0,
 					.render_params_ptr = rp,
 				};
-				mpmc_queue_produce(&sched->parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
+				mpmc_queue_produce(&sched->parallel_work_queue, &primitive_task, MPMC_QUEUE_WAIT_INFINITE);
 			}
 		}
+	}
+	int buf_disp = sched->frame_to_be_displayed % nb2;
+	sched->display_pending[buf_disp * num_y + sched->row_to_be_displayed] = false;
+	sched->row_to_be_displayed++;
+	if (sched->row_to_be_displayed >= num_y) {
+		sched->total_frame_gen_time += timer_elapsed_ms(&sched->timer);
+		sched->row_to_be_displayed = 0;
+		sched->frame_to_be_displayed++;
+	}
+	buf_disp = sched->frame_to_be_displayed % nb2;
+	if (sched->display_pending[buf_disp * num_y + sched->row_to_be_displayed]) {
+		task_t display_task = {
+			.type = DISPLAY_FRAME,
+			.frame = sched->frame_to_be_displayed,
+			.chunk_y = sched->row_to_be_displayed,
+			.chunk_x = 0,
+			.render_params_ptr = NULL,
+		};
+		*task = display_task;
+		*override_next_task = 1;
 	}
 	thread_mutex_unlock(&sched->state_mutex);
 }
@@ -743,19 +760,31 @@ int worker_thread(void* arg) {
 		mpmc_queue_consume(&ctx->sched.parallel_work_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
 		if (task.type == EXIT_LOOP) break;
 
-		switch (task.type) {
-		case PROCESS_PRIMITIVES:
-			worker_thread_process_primitives(&task, wa);
-			break;
-		case RENDER_FRAME:
-			worker_thread_render_frame(&task, wa);
-			break;
-		case ENCODE_FRAME:
-			worker_thread_encode_frame(&task, wa);
-			break;
-		default:
-			break;
-		}
+		int override_next_task = 1;
+		while (override_next_task) {
+			override_next_task = 0;
+			task_t current_task = task;
+			// print_task(&current_task, 0);
+
+			switch (task.type) {
+				case PROCESS_PRIMITIVES:
+					worker_thread_process_primitives(&task, wa, &override_next_task);
+					break;
+				case RENDER_FRAME:
+					worker_thread_render_frame(&task, wa, &override_next_task);
+					break;
+				case ENCODE_FRAME:
+					worker_thread_encode_frame(&task, wa, &override_next_task);
+					break;
+				case DISPLAY_FRAME:
+					worker_thread_display_frame(&task, wa, &override_next_task);
+					break;
+				default:
+					break;
+			}
+			// print_task(&current_task, 1);
+
+		} 
 	}
 	return 0;
 }
@@ -781,35 +810,18 @@ static inline void trender_loop(trender_ctx_t* ctx, mesh_t* mesh, tio_ctx_t* tio
 	/* Spawn workers. */
 	worker_arg_t* wargs   = (worker_arg_t*)malloc((size_t)ctx->num_workers * sizeof(worker_arg_t));
 	thread_ptr_t* threads = (thread_ptr_t*)malloc((size_t)ctx->num_workers * sizeof(thread_ptr_t));
-	for (int i = 0; i < ctx->num_workers; i++) {
+	for (int i = 1; i < ctx->num_workers; i++) {
 		wargs[i]   = (worker_arg_t){ .ctx = ctx, .mesh = mesh, .id = i };
 		threads[i] = thread_create(worker_thread, &wargs[i], THREAD_STACK_SIZE_DEFAULT);
 	}
 
-	worker_arg_t wa = (worker_arg_t){ .ctx = ctx, .mesh = mesh, .id = -1 };
-	/* Display loop (this thread). */
-	while (1) {
-		task_t task;
-		mpmc_queue_consume(&sched->display_queue, &task, MPMC_QUEUE_WAIT_INFINITE);
-		if (task.type == EXIT_LOOP) break;
+	wargs[0]   = (worker_arg_t){ .ctx = ctx, .mesh = mesh, .id = 0 };
+	worker_thread((void *)&wargs[0]);
 
-		worker_thread_display_frame(&task, &wa);
-	}
-
-	for (int i = 0; i < ctx->num_workers; i++)
+	for (int i = 1; i < ctx->num_workers; i++)
 		thread_join(threads[i]);
 	free(threads);
 	free(wargs);
-
-	/* Leaving the final image on screen (no delete on exit). To instead free all
-	   pipeline images on exit, re-enable:
-	// if (ctx->display_mode == TIO_GFX_BACKEND_KITTY) {
-	// 	char del[32 * TRENDER_KITTY_NUM_IMAGES]; int n = 0;
-	// 	for (int k = 0; k < TRENDER_KITTY_NUM_IMAGES; k++)
-	// 		n += tio_gfx_kitty_delete_image_seq(TRENDER_KITTY_IMAGE_ID_BASE + k, del + n, sizeof(del) - n);
-	// 	tio_write(tio, del, (size_t)n);
-	// }
-	*/
 }
 
 static inline void trender_print_stats(trender_ctx_t* ctx, int num_frames) {
