@@ -94,6 +94,13 @@ else()
   target_link_libraries(timer_test PRIVATE)
 endif()
 
+add_executable(tio_trace ${CMAKE_SOURCE_DIR}/src/tio_trace.c)
+if(UNIX)
+  target_link_libraries(tio_trace PRIVATE m ${RT_LIB})
+else()
+  target_link_libraries(tio_trace PRIVATE)
+endif()
+
 # Default build type if not set
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)

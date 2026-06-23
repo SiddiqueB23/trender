@@ -12,7 +12,9 @@
 #include "thread.h"
 #define MPMC_QUEUE_IMPLEMENTATION
 #include "mpmc_queue.h"
-#include "trender_input.h"
+#include "trender_input.h"  
+#define TIO_TRACE_LOG_IMPLEMENTATION
+#include "tio_trace_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +61,8 @@
 #define TRENDER_KITTY_Z_BASE        (-1)
 #define TRENDER_KITTY_Z_STEP        2
 
+#define TIO_TRACE_ENABLED 0
+
 enum task_type {
 	PROCESS_PRIMITIVES,
     RENDER_FRAME,
@@ -87,6 +91,28 @@ void print_task(task_t *task, int start) {
 	       start_end[start % 2] ,task_type_names[task->type], task->frame, task->chunk_y, task->chunk_x);
 	fflush(stdout);
 }
+
+
+#if TIO_TRACE_ENABLED
+void add_task_trace(task_t *task){
+	static const char* task_type_names[] = {
+		"PROCESS_PRIMITIVES", "RENDER_FRAME", "ENCODE_FRAME", "DISPLAY_FRAME",
+	};
+	static const uint32_t task_colors[] = {
+		0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00,
+	};
+	char output[128];
+	int t = task->type;
+	snprintf(output, 128, "%c_%d_%d_%d_%s",
+		task_type_names[t][0],
+		task->frame, task->chunk_y, task->chunk_x,
+		task_type_names[t]
+	);
+	char group[64];
+	snprintf(group, sizeof group, "THREAD %p", thread_current_thread_id());
+	tio_trace_log_append(group, output, task_colors[t]);
+}
+#endif
 
 typedef struct {
     /* configuration */
@@ -262,9 +288,9 @@ static inline size_t* gfx_out_size_at(trender_ctx_t* ctx, int b, int c) {
 static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, int cols,
 	const cli_args_t* args) {
 	int num_workers                            = args->threads;
-	int num_render_pass_chunks_y               = num_workers * 1; /* TODO: independent CLI flag later */
-	int num_render_pass_chunks_x               = num_workers * 1;
-	int num_prim_pass_chunks                   = num_workers;
+	int num_render_pass_chunks_y               = max_int(num_workers * 1 - 0, 1); /* TODO: independent CLI flag later */
+	int num_render_pass_chunks_x               = max_int(num_workers * 1 - 0, 1);
+	int num_prim_pass_chunks                   = max_int(num_workers * 1 - 1, 1);
 	int num_buffers                            = args->buffers;
 	tio_gfx_backend display_mode               = args->display_mode;
 	tio_gfx_halfblock_color_mode hb_color_mode = args->hb_color_mode;
@@ -473,6 +499,11 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 					   num_render_pass_chunks_y, num_render_pass_chunks_x, num_prim_pass_chunks,
 					   num_workers,
 	                   args->frames, queue_capacity);
+
+#if TIO_TRACE_ENABLED
+	tio_trace_log_init("x");
+#endif
+
 	return 0;
 }
 
@@ -500,6 +531,11 @@ static inline void trender_ctx_destroy(trender_ctx_t* ctx) {
 	free(ctx->gfx_ctx);
 	free(ctx->chunk_gp);
 	scheduler_ctx_destroy(&ctx->sched);
+
+#if TIO_TRACE_ENABLED
+	tio_trace_log_destroy();
+#endif
+
 }
 
 typedef struct { trender_ctx_t* ctx; mesh_t* mesh; int id; } worker_arg_t;
@@ -770,6 +806,11 @@ int worker_thread(void* arg) {
 			// task_t current_task = task;
 			// print_task(&current_task, 0);
 
+#if TIO_TRACE_ENABLED
+			task_t current_task = task;
+			add_task_trace(&current_task);
+#endif
+
 			switch (task.type) {
 				case PROCESS_PRIMITIVES:
 					worker_thread_process_primitives(&task, wa, &override_next_task);
@@ -786,6 +827,11 @@ int worker_thread(void* arg) {
 				default:
 					break;
 			}
+
+#if TIO_TRACE_ENABLED
+			add_task_trace(&current_task);
+#endif
+
 			// print_task(&current_task, 1);
 
 		} 
