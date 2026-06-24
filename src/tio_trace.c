@@ -8,6 +8,7 @@
 #include "tio.h"
 
 #define TIO_TRACE_NAME_MAX 128
+#define TASK_GRADIENT_T 30   /* percent shift toward lighter/darker variant */
 
 // Sentinel stored in tio_trace_display.text to mark a task's right edge; never
 // appears in a real event name. Translated to the UTF-8 bytes for U+258C
@@ -276,6 +277,36 @@ void tio_trace_display_init(tio_trace_display* display, tio_ctx_t* tio, tio_trac
     display->text = malloc(cells * sizeof(char));
 }
 
+static uint32_t gradient_color(uint32_t base, int x, int width) {
+    int r = (int)((base >> 16) & 0xFF);
+    int g = (int)((base >>  8) & 0xFF);
+    int b = (int)( base        & 0xFF);
+    int luminance = (299 * r + 587 * g + 114 * b) / 1000;
+
+    double factor = TASK_GRADIENT_T / 100.0;
+    int dr, dg, db;
+    if (luminance > 64) {
+        dr = (int)(r * (1.0 - factor));
+        dg = (int)(g * (1.0 - factor));
+        db = (int)(b * (1.0 - factor));
+    } else {
+        dr = r + (int)((255 - r) * factor);
+        dg = g + (int)((255 - g) * factor);
+        db = b + (int)((255 - b) * factor);
+    }
+
+    int ar, ag, ab, br, bg, bb;
+    if (luminance > 64) { ar=dr; ag=dg; ab=db; br=r;  bg=g;  bb=b;  }
+    else                  { ar=r;  ag=g;  ab=b;  br=dr; bg=dg; bb=db; }
+
+    double t = (width > 1) ? (double)x / (double)(width - 1) : 0.0;
+    int or_ = ar + (int)((br - ar) * t);
+    int og  = ag + (int)((bg - ag) * t);
+    int ob  = ab + (int)((bb - ab) * t);
+
+    return ((uint32_t)or_ << 16) | ((uint32_t)og << 8) | (uint32_t)ob;
+}
+
 void tio_trace_display_refresh(tio_trace_display* display, tio_trace_display_params* params, tio_trace_t trace) {
     size_t cells = (size_t)display->width * (size_t)display->height;
     memset(display->color, 0, cells * sizeof(uint32_t));
@@ -318,8 +349,9 @@ void tio_trace_display_refresh(tio_trace_display* display, tio_trace_display_par
             if (start_col < 0) start_col = 0;
             int end_col = genuine_edge ? raw_end_col : display->width - 1;
 
+            int task_width = end_col - start_col + 1;
             for (int c = start_col; c <= end_col; c++) {
-                display->color[row * display->width + c] = group.event_colors[i];
+                display->color[row * display->width + c] = gradient_color(group.event_colors[i], c - start_col, task_width);
             }
 
             // Lay the event name left-aligned within its visible span, truncated to fit.
