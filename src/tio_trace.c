@@ -267,7 +267,9 @@ void tio_trace_display_init(tio_trace_display* display, tio_ctx_t* tio, tio_trac
         display->group_row_offset[g] = height;
         height += trace.group[g].max_overlapping_tasks;
     }
-    display->height = height > 0 ? height : 1;
+    int natural_height = height > 0 ? height : 1;
+    int max_height = rows > 3 ? rows - 3 : 1;
+    display->height = natural_height < max_height ? natural_height : max_height;
 
     size_t cells = (size_t)display->width * (size_t)display->height;
     display->color = malloc(cells * sizeof(uint32_t));
@@ -339,6 +341,24 @@ void tio_trace_display_refresh(tio_trace_display* display, tio_trace_display_par
     }
 }
 
+/* UTF-8 byte sequences for the 8 vertical eighth-block tick glyphs, left-to-right.
+   U+258F and U+2595 are in the BMP (3-byte); U+1FB70-1FB75 are above U+FFFF (4-byte). */
+static const struct { const char* bytes; int len; } TICK_GLYPHS[8] = {
+    { "\xe2\x96\x8f",      3 }, /* U+258F  ▏ LEFT ONE EIGHTH BLOCK       */
+    { "\xf0\x9f\xad\xb0", 4 }, /* U+1FB70 🭰 VERTICAL ONE EIGHTH BLOCK-2 */
+    { "\xf0\x9f\xad\xb1", 4 }, /* U+1FB71 🭱 VERTICAL ONE EIGHTH BLOCK-3 */
+    { "\xf0\x9f\xad\xb2", 4 }, /* U+1FB72 🭲 VERTICAL ONE EIGHTH BLOCK-4 */
+    { "\xf0\x9f\xad\xb3", 4 }, /* U+1FB73 🭳 VERTICAL ONE EIGHTH BLOCK-5 */
+    { "\xf0\x9f\xad\xb4", 4 }, /* U+1FB74 🭴 VERTICAL ONE EIGHTH BLOCK-6 */
+    { "\xf0\x9f\xad\xb5", 4 }, /* U+1FB75 🭵 VERTICAL ONE EIGHTH BLOCK-7 */
+    { "\xe2\x96\x95",      3 }, /* U+2595  ▕ RIGHT ONE EIGHTH BLOCK      */
+};
+
+typedef struct {
+    int* tick_glyphs; /* [width]: -1 = no tick, 0-7 = index into TICK_GLYPHS */
+    int  width;
+} tio_trace_legend;
+
 // Picks black or white foreground text for the given RGB background, using
 // perceived-brightness (ITU-R BT.601) luminance so text stays readable against
 // both light and dark task colors.
@@ -347,7 +367,7 @@ static uint32_t contrasting_fg(int r, int g, int b) {
     return luminance > 128 ? 0x000000 : 0xFFFFFF;
 }
 
-void tio_trace_display_output(tio_trace_display* display, tio_ctx_t* tio) {
+void tio_trace_display_output(tio_trace_display* display, tio_ctx_t* tio, tio_trace_legend* legend) {
     // Worst case per cell: SGR bg + fg color change (~40 bytes) + 1 char. Plus a
     // reset and CRLF per row, plus a leading "move cursor home" sequence.
     size_t cap = (size_t)display->width * (size_t)display->height * 44 + (size_t)display->height * 8 + 16;
@@ -370,6 +390,16 @@ void tio_trace_display_output(tio_trace_display* display, tio_ctx_t* tio) {
                 p += sprintf(p, "\x1b[49m\x1b[38;2;%d;%d;%dm", r, g, b);
                 memcpy(p, "\xe2\x96\x8c", 3); p += 3; // U+258C LEFT HALF BLOCK
                 prev_color = 0xFFFFFFFF; // force the next cell to re-emit its own SGR state
+                continue;
+            }
+
+            /* Tick glyph overlay: only for empty background cells */
+            if (ch == ' ' && color == 0 && legend != NULL && legend->tick_glyphs[col] != -1) {
+                memcpy(p, "\x1b[0m", 4); p += 4;
+                int gi = legend->tick_glyphs[col];
+                memcpy(p, TICK_GLYPHS[gi].bytes, (size_t)TICK_GLYPHS[gi].len);
+                p += TICK_GLYPHS[gi].len;
+                prev_color = 0xFFFFFFFF;
                 continue;
             }
 
@@ -397,6 +427,173 @@ void tio_trace_display_free(tio_trace_display* display) {
     free(display->group_row_offset);
     free(display->color);
     free(display->text);
+}
+
+/* Picks the smallest "nice number" step (1, 2, or 5 × 10^n) such that at most 16
+   ticks are visible and label strings (dp decimal places on ref_val) don't overlap. */
+static double legend_nice_step(double view_span, double time_per_char, double ref_val) {
+    int n = (int)floor(log10(view_span)) - 1;
+    double base = pow(10.0, (double)n);
+    static const double factors[3] = { 1.0, 2.0, 5.0 };
+    for (int pass = 0; pass < 12; pass++, base *= 10.0) {
+        for (int fi = 0; fi < 3; fi++) {
+            double step = factors[fi] * base;
+            if (view_span / step > 16.0) continue;
+            int dp = (int)fmax(0.0, -floor(log10(step)));
+            char tmp[64];
+            int lw = snprintf(tmp, sizeof tmp, "%.*f", dp, ref_val);
+            if (step / time_per_char >= (double)(lw + 1)) return step;
+        }
+    }
+    return view_span;
+}
+
+void tio_trace_legend_init(tio_trace_legend* legend, int width) {
+    legend->width = width;
+    legend->tick_glyphs = malloc((size_t)width * sizeof(int));
+}
+
+void tio_trace_legend_free(tio_trace_legend* legend) {
+    free(legend->tick_glyphs);
+}
+
+void tio_trace_legend_refresh(tio_trace_legend* legend, tio_trace_display_params* params) {
+    int width = legend->width;
+    for (int i = 0; i < width; i++) legend->tick_glyphs[i] = -1;
+    if (params->time_per_char <= 0.0) return;
+
+    double view_span = params->time_per_char * (double)width;
+    double step = legend_nice_step(view_span, params->time_per_char, params->start + view_span);
+    double first_tick = ceil(params->start / step) * step;
+
+    for (int k = 0; ; k++) {
+        double tick = first_tick + (double)k * step;
+        if (tick > params->start + view_span * (1.0 + 1e-9)) break;
+        double col_exact = (tick - params->start) / params->time_per_char;
+        int col = (int)floor(col_exact);
+        if (col < 0 || col >= width) continue;
+        double sub = col_exact - (double)col;
+        int gi = (int)(sub * 8.0);
+        if (gi < 0) gi = 0;
+        if (gi > 7) gi = 7;
+        legend->tick_glyphs[col] = gi;
+    }
+
+    /* Fixed edge ticks always present regardless of nice-number spacing. */
+    legend->tick_glyphs[0]         = 0; /* U+258F ▏ at left display edge  */
+    legend->tick_glyphs[width - 1] = 7; /* U+2595 ▕ at right display edge */
+}
+
+void tio_trace_legend_output(tio_trace_legend* legend, tio_ctx_t* tio, tio_trace_display_params* params) {
+    int width = legend->width;
+    if (params->time_per_char <= 0.0) return;
+
+    double view_span  = params->time_per_char * (double)width;
+    double right_time = params->start + view_span;
+    double step       = legend_nice_step(view_span, params->time_per_char, right_time);
+
+    /* Scale so the right edge (max visible value) lands in [1.0, 10.0).
+       interior ticks may need decimal places when step is finer than norm_scale. */
+    int scale_exp  = (right_time > 0.0) ? (int)floor(log10(right_time)) : 0;
+    double norm_scale = pow(10.0, (double)scale_exp);
+    int step_exp   = (int)floor(log10(step));
+    int dp_interior = (scale_exp > step_exp) ? (scale_exp - step_exp) : 0;
+
+    /* Re-enumerate ticks to pair each column with its exact time for label formatting.
+       Uses first_tick + k*step (not accumulation) to avoid floating-point drift. */
+    double* tick_times = malloc((size_t)(width + 1) * sizeof(double));
+    int*    tick_cols  = malloc((size_t)(width + 1) * sizeof(int));
+    int tick_count = 0;
+    double first_tick = ceil(params->start / step) * step;
+    for (int k = 0; tick_count <= width; k++) {
+        double tick = first_tick + (double)k * step;
+        if (tick > params->start + view_span * (1.0 + 1e-9)) break;
+        double col_exact = (tick - params->start) / params->time_per_char;
+        int col = (int)floor(col_exact);
+        if (col >= 0 && col < width) {
+            tick_times[tick_count] = tick;
+            tick_cols[tick_count]  = col;
+            tick_count++;
+        }
+    }
+
+    /* Line 1: tick glyph per column, space elsewhere */
+    char* line1 = malloc((size_t)width * 4 + 3);
+    char* p = line1;
+    for (int col = 0; col < width; col++) {
+        int gi = legend->tick_glyphs[col];
+        if (gi < 0) {
+            *p++ = ' ';
+        } else {
+            memcpy(p, TICK_GLYPHS[gi].bytes, (size_t)TICK_GLYPHS[gi].len);
+            p += TICK_GLYPHS[gi].len;
+        }
+    }
+    memcpy(p, "\r\n", 2); p += 2;
+    tio_write(tio, line1, (size_t)(p - line1));
+    free(line1);
+
+    /* Line 2: edge glyphs at col 0 and col width-1, interior nice-number labels in between.
+       Edge cols use the same block glyph as line 1 to extend the tick mark downward.
+       Interior labels are clamped to [1, width-2] so they never overwrite the edge glyphs. */
+    char* line2 = malloc((size_t)width * 4 + 3); /* worst case: every cell is a 4-byte glyph */
+    char* ascii_interior = malloc((size_t)width); /* temp: ASCII only for cols 1..width-2 */
+    memset(ascii_interior, ' ', (size_t)width);
+    int next_free = 1; /* start after col 0 edge glyph */
+    for (int ti = 0; ti < tick_count; ti++) {
+        int c = tick_cols[ti];
+        if (c == 0 || c == width - 1) continue;
+        char buf[64];
+        int L = snprintf(buf, sizeof buf, "%.*f", dp_interior, tick_times[ti] / norm_scale);
+        int ls = c - L / 2;
+        if (ls < 1) ls = 1;
+        if (ls + L > width - 1) ls = width - 1 - L;
+        if (ls < next_free) continue;
+        memcpy(ascii_interior + ls, buf, (size_t)L);
+        next_free = ls + L + 1;
+    }
+    {
+        char* q = line2;
+        /* col 0: edge glyph */
+        memcpy(q, TICK_GLYPHS[0].bytes, (size_t)TICK_GLYPHS[0].len);
+        q += TICK_GLYPHS[0].len;
+        /* cols 1..width-2: ASCII interior */
+        memcpy(q, ascii_interior + 1, (size_t)(width - 2));
+        q += width - 2;
+        /* col width-1: edge glyph */
+        memcpy(q, TICK_GLYPHS[7].bytes, (size_t)TICK_GLYPHS[7].len);
+        q += TICK_GLYPHS[7].len;
+        memcpy(q, "\r\n", 2); q += 2;
+        tio_write(tio, line2, (size_t)(q - line2));
+    }
+    free(ascii_interior);
+    free(line2);
+
+    /* Line 3: actual start/end values (5 decimal places) at display edges + scale centred between them. */
+    char* line3 = malloc((size_t)width + 3);
+    memset(line3, ' ', (size_t)width);
+
+    char left_buf[32];
+    int left_len = snprintf(left_buf, sizeof left_buf, "%.5f", params->start / norm_scale);
+    if (left_len <= width) memcpy(line3, left_buf, (size_t)left_len);
+
+    char right_buf[32];
+    int right_len = snprintf(right_buf, sizeof right_buf, "%.5f", right_time / norm_scale);
+    int right_start = width - right_len;
+    if (right_start >= 0) memcpy(line3 + right_start, right_buf, (size_t)right_len);
+
+    char scale[32];
+    int slen = snprintf(scale, sizeof scale, "x10^%d s", scale_exp);
+    int scale_pos = (width - slen) / 2;
+    if (scale_pos > left_len + 1 && scale_pos + slen < right_start)
+        memcpy(line3 + scale_pos, scale, (size_t)slen);
+
+    line3[width] = '\r'; line3[width + 1] = '\n';
+    tio_write(tio, line3, (size_t)width + 2);
+    free(line3);
+
+    free(tick_times);
+    free(tick_cols);
 }
 
 // Clamps the view so it never extends past [data_start, data_end] and never
@@ -501,6 +698,9 @@ int main(int argc, char* argv[]) {
     tio_trace_display display;
     tio_trace_display_init(&display, &tio_ctx, trace);
 
+    tio_trace_legend legend;
+    tio_trace_legend_init(&legend, display.width);
+
     tio_trace_display_params params;
     params.start = data_start;
     params.end = data_end;
@@ -541,15 +741,18 @@ int main(int argc, char* argv[]) {
         }
 
         tio_trace_display_refresh(&display, &params, trace);
-        tio_trace_display_output(&display, &tio_ctx);
+        tio_trace_display_output(&display, &tio_ctx, &legend);
+        tio_trace_legend_refresh(&legend, &params);
+        tio_trace_legend_output(&legend, &tio_ctx, &params);
 
         if (!quit_requested) trace_sleep_ms(16);
     }
 
-    printf("\x1b[%d;1H\r\n", display.height + 1);
-    printf("\x1b[?25h"); // Show cursor
+    printf("\x1b[%d;1H\r\n", display.height + 4);
+    printf("\x1b[?25h");
     fflush(stdout);
 
+    tio_trace_legend_free(&legend);
     tio_trace_display_free(&display);
     tio_trace_free(&trace);
     return 0;
