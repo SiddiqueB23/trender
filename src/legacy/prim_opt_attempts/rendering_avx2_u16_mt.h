@@ -18,6 +18,7 @@ const int fixed_point_scale = 16;
 
 typedef struct {
 	float position_x, position_y, position_z;
+	float texcoord_u, texcoord_v;
 } raw_vertex_t;
 
 typedef struct {
@@ -31,14 +32,6 @@ typedef struct {
 	int tex_width;
 	int tex_height;
 } processed_triangle_t;
-
-typedef struct {
-	float x, y, z, w;
-} clip_vertex_t;
-
-typedef struct {
-	clip_vertex_t v0, v1, v2;
-} clip_triangle_t;
 
 typedef struct {
 	mat3 normal_transform; 
@@ -95,26 +88,31 @@ void free_rendering_ctx(rendering_ctx_t* ctx) {
 /* =========================================================== */
 /*  Vertex Processing                                          */
 /* =========================================================== */
-raw_vertex_t create_vertex(float* raw_vertices, int* indices, int local_fv) {
-	int v = indices[local_fv];
+raw_vertex_t create_vertex(tinyobj_attrib_t attrib, tinyobj_vertex_index_t idx) {
 	raw_vertex_t input;
-	input.position_x = raw_vertices[3 * v + 0];
-	input.position_y = raw_vertices[3 * v + 1];
-	input.position_z = raw_vertices[3 * v + 2];
+	input.position_x = attrib.vertices[3 * idx.v_idx + 0];
+	input.position_y = attrib.vertices[3 * idx.v_idx + 1];
+	input.position_z = attrib.vertices[3 * idx.v_idx + 2];
+	if (idx.vt_idx >= 0) {
+		input.texcoord_u = attrib.texcoords[2 * idx.vt_idx + 0];
+		input.texcoord_v = attrib.texcoords[2 * idx.vt_idx + 1];
+	}
 	return input;
 }
 
-clip_vertex_t process_vertex(raw_vertex_t input, mat4 model_view_projection) {
+processed_vertex_t process_vertex(raw_vertex_t input, mat4 model_view_projection) {
 	vec4 position = { input.position_x, input.position_y, input.position_z, 1.0f };
 	vec4 homogenous_position;
 	glm_mat4_mulv(model_view_projection, position, homogenous_position);
-	clip_vertex_t v = {
-		.x = homogenous_position[0],
-		.y = homogenous_position[1],
-		.z = homogenous_position[2],
-		.w = homogenous_position[3],
+	processed_vertex_t processed_vertex = {
+		.homogenous_position_x = homogenous_position[0],
+		.homogenous_position_y = homogenous_position[1],
+		.homogenous_position_z = homogenous_position[2],
+		.homogenous_position_w = homogenous_position[3],
+		.texcoord_u = input.texcoord_u,
+		.texcoord_v = input.texcoord_v,
 	};
-	return v;
+	return processed_vertex;
 }
 
 processed_vertex_t process_vertex_2(vec4* ndc_arr, tinyobj_attrib_t attrib, tinyobj_vertex_index_t idx) {
@@ -137,15 +135,11 @@ static inline int is_inside_near_plane(processed_vertex_t v) {
 	return v.homogenous_position_z >= -v.homogenous_position_w;
 }
 
-static inline int is_inside_near_plane_clip(clip_vertex_t v) {
-	return v.z >= -v.w;
-}
-
-static inline int compute_outcode(clip_vertex_t v) {
-	float x = v.x;
-	float y = v.y;
-	float z = v.z;
-	float w = v.w;
+static inline int compute_outcode(processed_vertex_t v) {
+	float x = v.homogenous_position_x;
+	float y = v.homogenous_position_y;
+	float z = v.homogenous_position_z;
+	float w = v.homogenous_position_w;
 	return ((z <= w))
 		| ((z >= -w) << 1)
 		| ((x >= -w) << 2)
@@ -154,13 +148,13 @@ static inline int compute_outcode(clip_vertex_t v) {
 		| ((y >= -w) << 5);
 }
 
-static inline int triangle_is_fully_clipped(clip_triangle_t tri) {
+static inline int triangle_is_fully_clipped(processed_triangle_t tri) {
 	int c0 = compute_outcode(tri.v0);
 	int c1 = compute_outcode(tri.v1);
 	int c2 = compute_outcode(tri.v2);
 
-	// A bit being 0 in all three means all verts are outside that plane.
-	// OR them together: any 0-bit in the result means all verts are outside that plane.
+	// A bit being 0 in all three means all verts are outside that plane
+	// AND them together: any 0-bit in the result = fully outside one plane
 	return (~(c0 | c1 | c2)) & 0x3F;
 }
 
@@ -265,11 +259,6 @@ void clip_triangle(processed_triangle_t in, processed_triangle_t* out1, processe
 void viewport_transform(processed_vertex_t* v, int width, int height, float* x, float* y) {
 	*x = ((v->homogenous_position_x / v->homogenous_position_w + 1.0f) * 0.5f * (float)width);
 	*y = ((1.0f - (v->homogenous_position_y / v->homogenous_position_w + 1.0f) * 0.5f) * (float)height);
-}
-
-static inline void viewport_transform_clip(clip_vertex_t* v, int width, int height, float* x, float* y) {
-	*x = ((v->x / v->w + 1.0f) * 0.5f * (float)width);
-	*y = ((1.0f - (v->y / v->w + 1.0f) * 0.5f) * (float)height);
 }
 
 float get_processed_triangle_area(processed_triangle_t triangle, int width, int height) {
@@ -524,58 +513,31 @@ void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, texture_atlas_t* atlas) {
 /*  Primitive Pass                                             */
 /* =========================================================== */
 
-typedef struct {
-	float min_x, min_y, min_z;
-	float max_x, max_y, max_z;
-} aabb_t;
+static inline processed_triangle_t process_triangle(mesh_t* mesh, int i, mat4 mvp) {
+	raw_vertex_t vert_input0 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 0]);
+	raw_vertex_t vert_input1 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 1]);
+	raw_vertex_t vert_input2 = create_vertex(mesh->attrib, mesh->attrib.faces[i * 3 + 2]);
 
-static int build_chunk_vertex_arrays(mesh_t* mesh, int start_index, int end_index, float* raw_vertices, int* indices) {
-	int num_verts = (int)mesh->attrib.num_vertices;
-	int bitmask_words = (num_verts + 63) / 64;
-	uint64_t* bitmask    = (uint64_t*)calloc((size_t)bitmask_words, sizeof(uint64_t));
-	int*      vid_to_local = (int*)malloc((size_t)num_verts * sizeof(int));
-	int num_unique = 0;
-	for (int i = start_index; i < end_index; i++) {
-		int local_tri = i - start_index;
-		for (int v = 0; v < 3; v++) {
-			int vid = mesh->attrib.faces[i * 3 + v].v_idx;
-			int word = vid >> 6;
-			uint64_t bit = (uint64_t)1 << (vid & 63);
-			if (bitmask[word] & bit) {
-				indices[local_tri * 3 + v] = vid_to_local[vid];
-			} else {
-				bitmask[word] |= bit;
-				vid_to_local[vid] = num_unique;
-				raw_vertices[num_unique * 3 + 0] = mesh->attrib.vertices[3 * vid + 0];
-				raw_vertices[num_unique * 3 + 1] = mesh->attrib.vertices[3 * vid + 1];
-				raw_vertices[num_unique * 3 + 2] = mesh->attrib.vertices[3 * vid + 2];
-				indices[local_tri * 3 + v] = num_unique++;
-			}
-		}
+	processed_triangle_t triangle;
+	triangle.v0 = process_vertex(vert_input0, mvp);
+	triangle.v1 = process_vertex(vert_input1, mvp);
+	triangle.v2 = process_vertex(vert_input2, mvp);
+
+	int mat_idx = mesh->attrib.material_ids[i];
+	triangle.tex_width = 0;
+	triangle.tex_height = 0;
+	triangle.diffuse_atlas_offset = 0;
+	if (mat_idx != -1) {
+		triangle.tex_width = mesh->materials[mat_idx].texture_width;
+		triangle.tex_height = mesh->materials[mat_idx].texture_height;
+		triangle.diffuse_atlas_offset = mesh->materials[mat_idx].diffuse_atlas_offset;
 	}
-	free(bitmask);
-	free(vid_to_local);
-	return num_unique;
-}
-
-static inline clip_triangle_t process_triangle(float* raw_vertices, int* indices, int local_tri_idx, mat4 mvp) {
-	int base = local_tri_idx * 3;
-	raw_vertex_t r0 = create_vertex(raw_vertices, indices, base + 0);
-	raw_vertex_t r1 = create_vertex(raw_vertices, indices, base + 1);
-	raw_vertex_t r2 = create_vertex(raw_vertices, indices, base + 2);
-	clip_triangle_t triangle;
-	triangle.v0 = process_vertex(r0, mvp);
-	triangle.v1 = process_vertex(r1, mvp);
-	triangle.v2 = process_vertex(r2, mvp);
 	return triangle;
 }
 
 typedef struct {
-	clip_triangle_t*      triangles;   /* [num_triangles], MVP-transformed positions only */
+	processed_triangle_t* triangles;   /* [num_triangles], indexed by triangle i */
 	int                   num_triangles;
-	int                   start_index; /* global mesh triangle index of triangles[0] */
-	float*                raw_vertices; /* deduplicated xyz positions for the active chunk */
-	int*                  indices;      /* [num_triangles * 3] local index into raw_vertices per face vertex */
 	render_params_t       params;      /* process_triangle reads params.model_view_projection */
 	monotonic_timer_t     timer;
 	double                total_primitive_time;
@@ -592,21 +554,12 @@ typedef struct {
 	uint64_t*			  chunk_hints;	/* [num_chunks_y * num_chunks_x * hint_bitarray_size], flat-indexed (y*num_chunks_x+x)*hint_bitarray_size */
 	uint64_t* 			  chunk_hints_temp;
 	uint64_t			  requires_clipping_hint_temp;
-	/* AABB culling — one box per group of 64 triangles, object space */
-	aabb_t*               aabbs;
-	int                   num_aabbs;
-	/* Compact triangle mapping: compact_idx → original global face index */
-	int*                  original_indices;
 } primitive_pass_ctx_t;
 
-static inline primitive_pass_ctx_t create_primitive_pass_ctx(mesh_t* mesh, int start_index, int end_index, int num_chunks_y, int num_chunks_x) {
-	int num_triangles = end_index - start_index;
+static inline primitive_pass_ctx_t create_primitive_pass_ctx(int num_triangles, int num_chunks_y, int num_chunks_x) {
 	primitive_pass_ctx_t ctx;
 	ctx.num_triangles = num_triangles;
-	ctx.start_index   = start_index;
-	ctx.triangles    = (clip_triangle_t*)malloc((size_t)num_triangles * sizeof(clip_triangle_t));
-	ctx.raw_vertices = (float*)malloc((size_t)num_triangles * 3 * 3 * sizeof(float));
-	ctx.indices      = (int*)malloc((size_t)num_triangles * 3 * sizeof(int));
+	ctx.triangles = (processed_triangle_t*)malloc((size_t)num_triangles * sizeof(processed_triangle_t));
 	ctx.total_primitive_time = 0.0;
 
 	ctx.num_chunks_y = num_chunks_y;
@@ -622,80 +575,41 @@ static inline primitive_pass_ctx_t create_primitive_pass_ctx(mesh_t* mesh, int s
 	ctx.requires_clipping_hint 	= (uint64_t*)calloc((size_t)ctx.hint_bitarray_size, sizeof(uint64_t));
 	ctx.chunk_hints 			= (uint64_t*)calloc((size_t)(ctx.hint_bitarray_size * num_chunks_y * num_chunks_x), sizeof(uint64_t));
 	ctx.chunk_hints_temp 		= (uint64_t*)calloc((size_t)(num_chunks_y * num_chunks_x), sizeof(uint64_t));
-
-	ctx.original_indices = (int*)malloc((size_t)num_triangles * sizeof(int));
-
-	int num_unique = build_chunk_vertex_arrays(mesh, start_index, end_index, ctx.raw_vertices, ctx.indices);
-	ctx.raw_vertices = (float*)realloc(ctx.raw_vertices, (size_t)num_unique * 3 * sizeof(float));
-
-	ctx.num_aabbs = (num_triangles + 64 - 1) / 64;
-	ctx.aabbs     = (aabb_t*)malloc((size_t)ctx.num_aabbs * sizeof(aabb_t));
-	for (int g = 0; g < ctx.num_aabbs; g++) {
-		int t0 = g * 64;
-		int t1 = t0 + 64 < num_triangles ? t0 + 64 : num_triangles;
-		aabb_t* b = &ctx.aabbs[g];
-		b->min_x = b->min_y = b->min_z =  1e30f;
-		b->max_x = b->max_y = b->max_z = -1e30f;
-		for (int t = t0; t < t1; t++) {
-			for (int v = 0; v < 3; v++) {
-				int vid = ctx.indices[t * 3 + v];
-				float x = ctx.raw_vertices[vid * 3 + 0];
-				float y = ctx.raw_vertices[vid * 3 + 1];
-				float z = ctx.raw_vertices[vid * 3 + 2];
-				if (x < b->min_x) b->min_x = x; if (x > b->max_x) b->max_x = x;
-				if (y < b->min_y) b->min_y = y; if (y > b->max_y) b->max_y = y;
-				if (z < b->min_z) b->min_z = z; if (z > b->max_z) b->max_z = z;
-			}
-		}
-	}
-
 	return ctx;
 }
 
 static inline void free_primitive_pass_ctx(primitive_pass_ctx_t* ctx) {
 	free(ctx->triangles);
-	free(ctx->raw_vertices);
-	free(ctx->indices);
 	free(ctx->chunk_starty);
 	free(ctx->chunk_endy);
 	free(ctx->chunk_startx);
 	free(ctx->chunk_endx);
 	free(ctx->requires_clipping_hint);
 	free(ctx->chunk_hints);
-	free(ctx->chunk_hints_temp);
-	free(ctx->aabbs);
-	free(ctx->original_indices);
-}
-
-static inline int aabb_is_fully_clipped(aabb_t* b, mat4 mvp) {
-	float xs[2] = {b->min_x, b->max_x};
-	float ys[2] = {b->min_y, b->max_y};
-	float zs[2] = {b->min_z, b->max_z};
-	int combined = 0;
-	for (int xi = 0; xi < 2; xi++)
-	for (int yi = 0; yi < 2; yi++)
-	for (int zi = 0; zi < 2; zi++) {
-		raw_vertex_t rv = {xs[xi], ys[yi], zs[zi]};
-		combined |= compute_outcode(process_vertex(rv, mvp));
-	}
-	return (~combined) & 0x3F;
 }
 
 /* A triangle needs near-plane clipping when at least one (but not all) vertex is
  * outside the near plane. (Fully-outside triangles are caught by triangle_is_fully_clipped.) */
-static inline int triangle_requires_clipping(clip_triangle_t tri) {
-	return !(is_inside_near_plane_clip(tri.v0) && is_inside_near_plane_clip(tri.v1) && is_inside_near_plane_clip(tri.v2));
+static inline int triangle_requires_clipping(processed_triangle_t tri) {
+	return !(is_inside_near_plane(tri.v0) && is_inside_near_plane(tri.v1) && is_inside_near_plane(tri.v2));
 }
 
-static inline void set_hint_mask(clip_triangle_t* triangle, primitive_pass_ctx_t* ctx, int idx) {
+static inline void set_hint_mask(processed_triangle_t* triangle, primitive_pass_ctx_t* ctx, int idx) {
+	int num_cells = ctx->num_chunks_y * ctx->num_chunks_x;
+	if (triangle_is_fully_clipped(*triangle)) {
+		// for (int c = 0; c < num_cells; c++) {
+		// 	ctx->chunk_hints_temp[c] &= ~((uint64_t)1ULL << (idx % 64));
+		// }
+		return;
+	}
 	if (triangle_requires_clipping(*triangle)) {
 		ctx->requires_clipping_hint_temp |= ((uint64_t)1ULL << (idx % 64));
 		return;
 	}
 	float x0, y0, x1, y1, x2, y2;
-	viewport_transform_clip(&triangle->v0, ctx->width, ctx->height, &x0, &y0);
-	viewport_transform_clip(&triangle->v1, ctx->width, ctx->height, &x1, &y1);
-	viewport_transform_clip(&triangle->v2, ctx->width, ctx->height, &x2, &y2);
+	viewport_transform(&triangle->v0, ctx->width, ctx->height, &x0, &y0);
+	viewport_transform(&triangle->v1, ctx->width, ctx->height, &x1, &y1);
+	viewport_transform(&triangle->v2, ctx->width, ctx->height, &x2, &y2);
 	float xmin_f = fminf(x0, fminf(x1, x2));
 	float xmax_f = fmaxf(x0, fmaxf(x1, x2));
 	float ymin_f = fminf(y0, fminf(y1, y2));
@@ -714,82 +628,25 @@ static inline void set_hint_mask(clip_triangle_t* triangle, primitive_pass_ctx_t
 	}
 }
 
-void primitive_pass(primitive_pass_ctx_t* ctx, int start_index, int end_index) {
+void primitive_pass(mesh_t* mesh, primitive_pass_ctx_t* ctx, int start_index, int end_index) {
 	timer_start(&ctx->timer);
-	ctx->start_index = start_index;
 	int num_cells = ctx->num_chunks_y * ctx->num_chunks_x;
-	ctx->requires_clipping_hint_temp = 0;
 	size_t chunk_hints_temp_size = num_cells * sizeof(uint64_t);
-	memset(ctx->chunk_hints_temp, 0, chunk_hints_temp_size);
-
-	int compact_idx = 0;
-	for (int j = start_index; j < end_index; j += 64) {
-		int aabb_idx = (j - start_index) / 64;
-		if (aabb_is_fully_clipped(&ctx->aabbs[aabb_idx], ctx->params.model_view_projection))
-			continue;
-		for (int i = j; i < j + 64 && i < end_index; i++) {
-			clip_triangle_t tri = process_triangle(ctx->raw_vertices, ctx->indices, i - start_index, ctx->params.model_view_projection);
-			if (triangle_is_fully_clipped(tri)) continue;
-			ctx->triangles[compact_idx] = tri;
-			ctx->original_indices[compact_idx] = i;
-			set_hint_mask(&tri, ctx, compact_idx);
-			compact_idx++;
-			if (compact_idx % 64 == 0) {
-				int word = compact_idx / 64 - 1;
-				ctx->requires_clipping_hint[word] = ctx->requires_clipping_hint_temp;
-				for (int c = 0; c < num_cells; c++)
-					ctx->chunk_hints[c * ctx->hint_bitarray_size + word] = ctx->chunk_hints_temp[c];
-				ctx->requires_clipping_hint_temp = 0;
-				memset(ctx->chunk_hints_temp, 0, chunk_hints_temp_size);
-			}
+	for (int j = start_index; j < end_index; j+=64) {
+		ctx->requires_clipping_hint_temp = (uint64_t)0ULL;
+		memset((void *)ctx->chunk_hints_temp, (uint64_t)0ULL, chunk_hints_temp_size);
+		for(int i = j; i < j + 64 && i < end_index ;i++) {
+			processed_triangle_t tri = process_triangle(mesh, i, ctx->params.model_view_projection);
+			set_hint_mask(&tri, ctx, i - start_index);
+			ctx->triangles[i - start_index] = tri;
 		}
+		for (int c = 0; c < num_cells; c++) {
+			ctx->chunk_hints[c * ctx->hint_bitarray_size + (j - start_index)/64] = ctx->chunk_hints_temp[c];
+		}
+		ctx->requires_clipping_hint[(j - start_index)/64] = ctx->requires_clipping_hint_temp;
 	}
-	if (compact_idx % 64 != 0) {
-		int word = compact_idx / 64;
-		ctx->requires_clipping_hint[word] = ctx->requires_clipping_hint_temp;
-		for (int c = 0; c < num_cells; c++)
-			ctx->chunk_hints[c * ctx->hint_bitarray_size + word] = ctx->chunk_hints_temp[c];
-	}
-	ctx->num_triangles = compact_idx;
+	ctx->num_triangles = end_index - start_index;
 	ctx->total_primitive_time += timer_elapsed_ms(&ctx->timer);
-}
-
-processed_triangle_t get_triangle(mesh_t* mesh, primitive_pass_ctx_t* ctx, int idx) {
-	int gi = ctx->original_indices[idx];
-	clip_triangle_t* ct = &ctx->triangles[idx];
-
-	tinyobj_vertex_index_t f0 = mesh->attrib.faces[gi * 3 + 0];
-	tinyobj_vertex_index_t f1 = mesh->attrib.faces[gi * 3 + 1];
-	tinyobj_vertex_index_t f2 = mesh->attrib.faces[gi * 3 + 2];
-
-	processed_triangle_t tri;
-	tri.v0 = (processed_vertex_t){ ct->v0.x, ct->v0.y, ct->v0.z, ct->v0.w, 0.f, 0.f };
-	tri.v1 = (processed_vertex_t){ ct->v1.x, ct->v1.y, ct->v1.z, ct->v1.w, 0.f, 0.f };
-	tri.v2 = (processed_vertex_t){ ct->v2.x, ct->v2.y, ct->v2.z, ct->v2.w, 0.f, 0.f };
-
-	if (f0.vt_idx >= 0) {
-		tri.v0.texcoord_u = mesh->attrib.texcoords[2 * f0.vt_idx + 0];
-		tri.v0.texcoord_v = mesh->attrib.texcoords[2 * f0.vt_idx + 1];
-	}
-	if (f1.vt_idx >= 0) {
-		tri.v1.texcoord_u = mesh->attrib.texcoords[2 * f1.vt_idx + 0];
-		tri.v1.texcoord_v = mesh->attrib.texcoords[2 * f1.vt_idx + 1];
-	}
-	if (f2.vt_idx >= 0) {
-		tri.v2.texcoord_u = mesh->attrib.texcoords[2 * f2.vt_idx + 0];
-		tri.v2.texcoord_v = mesh->attrib.texcoords[2 * f2.vt_idx + 1];
-	}
-
-	int mat_idx = mesh->attrib.material_ids[gi];
-	tri.tex_width = 0;
-	tri.tex_height = 0;
-	tri.diffuse_atlas_offset = 0;
-	if (mat_idx != -1) {
-		tri.tex_width            = mesh->materials[mat_idx].texture_width;
-		tri.tex_height           = mesh->materials[mat_idx].texture_height;
-		tri.diffuse_atlas_offset = mesh->materials[mat_idx].diffuse_atlas_offset;
-	}
-	return tri;
 }
 
 /* =========================================================== */
@@ -814,7 +671,7 @@ void render_mesh(mesh_t* mesh, rendering_ctx_t* ctx, primitive_pass_ctx_t* prim)
 		for (int j = i; j < (i + 64) && j < prim->num_triangles; j++) {
 			
 			if (requires_clipping_hint_i & ((uint64_t)1ULL << (j-i))) {
-				processed_triangle_t triangle = get_triangle(mesh, prim, j);
+				processed_triangle_t triangle = prim->triangles[j];
 				/* Needs near-plane clipping — processed in every chunk (rasteriser clamps to strip). */
 				processed_triangle_t clipped_triangle0, clipped_triangle1;
 				int num_clipped_triangles = 0;
@@ -825,14 +682,13 @@ void render_mesh(mesh_t* mesh, rendering_ctx_t* ctx, primitive_pass_ctx_t* prim)
 				clipped_triangle1.diffuse_atlas_offset = triangle.diffuse_atlas_offset;
 				clipped_triangle1.tex_width  = triangle.tex_width;
 				clipped_triangle1.tex_height = triangle.tex_height;
-
+	
 				if (num_clipped_triangles == 0) continue;
 				rasterize_triangle_avx2_texture_index_only(&clipped_triangle0, ctx);
 				if (num_clipped_triangles == 1) continue;
 				rasterize_triangle_avx2_texture_index_only(&clipped_triangle1, ctx);
 			} else if (chunk_hint_i & ((uint64_t)1ULL << (j-i))) {
-				processed_triangle_t triangle = get_triangle(mesh, prim, j);
-				rasterize_triangle_avx2_texture_index_only(&triangle, ctx);
+				rasterize_triangle_avx2_texture_index_only(&prim->triangles[j], ctx);
 			}
 		}
 	}

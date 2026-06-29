@@ -524,11 +524,6 @@ void texture_sample_pass_5r6g5b(rendering_ctx_t* ctx, texture_atlas_t* atlas) {
 /*  Primitive Pass                                             */
 /* =========================================================== */
 
-typedef struct {
-	float min_x, min_y, min_z;
-	float max_x, max_y, max_z;
-} aabb_t;
-
 static int build_chunk_vertex_arrays(mesh_t* mesh, int start_index, int end_index, float* raw_vertices, int* indices) {
 	int num_verts = (int)mesh->attrib.num_vertices;
 	int bitmask_words = (num_verts + 63) / 64;
@@ -592,11 +587,6 @@ typedef struct {
 	uint64_t*			  chunk_hints;	/* [num_chunks_y * num_chunks_x * hint_bitarray_size], flat-indexed (y*num_chunks_x+x)*hint_bitarray_size */
 	uint64_t* 			  chunk_hints_temp;
 	uint64_t			  requires_clipping_hint_temp;
-	/* AABB culling — one box per group of 64 triangles, object space */
-	aabb_t*               aabbs;
-	int                   num_aabbs;
-	/* Compact triangle mapping: compact_idx → original global face index */
-	int*                  original_indices;
 } primitive_pass_ctx_t;
 
 static inline primitive_pass_ctx_t create_primitive_pass_ctx(mesh_t* mesh, int start_index, int end_index, int num_chunks_y, int num_chunks_x) {
@@ -623,31 +613,8 @@ static inline primitive_pass_ctx_t create_primitive_pass_ctx(mesh_t* mesh, int s
 	ctx.chunk_hints 			= (uint64_t*)calloc((size_t)(ctx.hint_bitarray_size * num_chunks_y * num_chunks_x), sizeof(uint64_t));
 	ctx.chunk_hints_temp 		= (uint64_t*)calloc((size_t)(num_chunks_y * num_chunks_x), sizeof(uint64_t));
 
-	ctx.original_indices = (int*)malloc((size_t)num_triangles * sizeof(int));
-
 	int num_unique = build_chunk_vertex_arrays(mesh, start_index, end_index, ctx.raw_vertices, ctx.indices);
 	ctx.raw_vertices = (float*)realloc(ctx.raw_vertices, (size_t)num_unique * 3 * sizeof(float));
-
-	ctx.num_aabbs = (num_triangles + 64 - 1) / 64;
-	ctx.aabbs     = (aabb_t*)malloc((size_t)ctx.num_aabbs * sizeof(aabb_t));
-	for (int g = 0; g < ctx.num_aabbs; g++) {
-		int t0 = g * 64;
-		int t1 = t0 + 64 < num_triangles ? t0 + 64 : num_triangles;
-		aabb_t* b = &ctx.aabbs[g];
-		b->min_x = b->min_y = b->min_z =  1e30f;
-		b->max_x = b->max_y = b->max_z = -1e30f;
-		for (int t = t0; t < t1; t++) {
-			for (int v = 0; v < 3; v++) {
-				int vid = ctx.indices[t * 3 + v];
-				float x = ctx.raw_vertices[vid * 3 + 0];
-				float y = ctx.raw_vertices[vid * 3 + 1];
-				float z = ctx.raw_vertices[vid * 3 + 2];
-				if (x < b->min_x) b->min_x = x; if (x > b->max_x) b->max_x = x;
-				if (y < b->min_y) b->min_y = y; if (y > b->max_y) b->max_y = y;
-				if (z < b->min_z) b->min_z = z; if (z > b->max_z) b->max_z = z;
-			}
-		}
-	}
 
 	return ctx;
 }
@@ -662,23 +629,6 @@ static inline void free_primitive_pass_ctx(primitive_pass_ctx_t* ctx) {
 	free(ctx->chunk_endx);
 	free(ctx->requires_clipping_hint);
 	free(ctx->chunk_hints);
-	free(ctx->chunk_hints_temp);
-	free(ctx->aabbs);
-	free(ctx->original_indices);
-}
-
-static inline int aabb_is_fully_clipped(aabb_t* b, mat4 mvp) {
-	float xs[2] = {b->min_x, b->max_x};
-	float ys[2] = {b->min_y, b->max_y};
-	float zs[2] = {b->min_z, b->max_z};
-	int combined = 0;
-	for (int xi = 0; xi < 2; xi++)
-	for (int yi = 0; yi < 2; yi++)
-	for (int zi = 0; zi < 2; zi++) {
-		raw_vertex_t rv = {xs[xi], ys[yi], zs[zi]};
-		combined |= compute_outcode(process_vertex(rv, mvp));
-	}
-	return (~combined) & 0x3F;
 }
 
 /* A triangle needs near-plane clipping when at least one (but not all) vertex is
@@ -688,6 +638,13 @@ static inline int triangle_requires_clipping(clip_triangle_t tri) {
 }
 
 static inline void set_hint_mask(clip_triangle_t* triangle, primitive_pass_ctx_t* ctx, int idx) {
+	int num_cells = ctx->num_chunks_y * ctx->num_chunks_x;
+	if (triangle_is_fully_clipped(*triangle)) {
+		// for (int c = 0; c < num_cells; c++) {
+		// 	ctx->chunk_hints_temp[c] &= ~((uint64_t)1ULL << (idx % 64));
+		// }
+		return;
+	}
 	if (triangle_requires_clipping(*triangle)) {
 		ctx->requires_clipping_hint_temp |= ((uint64_t)1ULL << (idx % 64));
 		return;
@@ -714,48 +671,30 @@ static inline void set_hint_mask(clip_triangle_t* triangle, primitive_pass_ctx_t
 	}
 }
 
-void primitive_pass(primitive_pass_ctx_t* ctx, int start_index, int end_index) {
+void primitive_pass(mesh_t* mesh, primitive_pass_ctx_t* ctx, int start_index, int end_index) {
 	timer_start(&ctx->timer);
 	ctx->start_index = start_index;
 	int num_cells = ctx->num_chunks_y * ctx->num_chunks_x;
-	ctx->requires_clipping_hint_temp = 0;
 	size_t chunk_hints_temp_size = num_cells * sizeof(uint64_t);
-	memset(ctx->chunk_hints_temp, 0, chunk_hints_temp_size);
-
-	int compact_idx = 0;
-	for (int j = start_index; j < end_index; j += 64) {
-		int aabb_idx = (j - start_index) / 64;
-		if (aabb_is_fully_clipped(&ctx->aabbs[aabb_idx], ctx->params.model_view_projection))
-			continue;
-		for (int i = j; i < j + 64 && i < end_index; i++) {
+	for (int j = start_index; j < end_index; j+=64) {
+		ctx->requires_clipping_hint_temp = (uint64_t)0ULL;
+		memset((void *)ctx->chunk_hints_temp, (uint64_t)0ULL, chunk_hints_temp_size);
+		for(int i = j; i < j + 64 && i < end_index ;i++) {
 			clip_triangle_t tri = process_triangle(ctx->raw_vertices, ctx->indices, i - start_index, ctx->params.model_view_projection);
-			if (triangle_is_fully_clipped(tri)) continue;
-			ctx->triangles[compact_idx] = tri;
-			ctx->original_indices[compact_idx] = i;
-			set_hint_mask(&tri, ctx, compact_idx);
-			compact_idx++;
-			if (compact_idx % 64 == 0) {
-				int word = compact_idx / 64 - 1;
-				ctx->requires_clipping_hint[word] = ctx->requires_clipping_hint_temp;
-				for (int c = 0; c < num_cells; c++)
-					ctx->chunk_hints[c * ctx->hint_bitarray_size + word] = ctx->chunk_hints_temp[c];
-				ctx->requires_clipping_hint_temp = 0;
-				memset(ctx->chunk_hints_temp, 0, chunk_hints_temp_size);
-			}
+			set_hint_mask(&tri, ctx, i - start_index);
+			ctx->triangles[i - start_index] = tri;
 		}
+		for (int c = 0; c < num_cells; c++) {
+			ctx->chunk_hints[c * ctx->hint_bitarray_size + (j - start_index)/64] = ctx->chunk_hints_temp[c];
+		}
+		ctx->requires_clipping_hint[(j - start_index)/64] = ctx->requires_clipping_hint_temp;
 	}
-	if (compact_idx % 64 != 0) {
-		int word = compact_idx / 64;
-		ctx->requires_clipping_hint[word] = ctx->requires_clipping_hint_temp;
-		for (int c = 0; c < num_cells; c++)
-			ctx->chunk_hints[c * ctx->hint_bitarray_size + word] = ctx->chunk_hints_temp[c];
-	}
-	ctx->num_triangles = compact_idx;
+	ctx->num_triangles = end_index - start_index;
 	ctx->total_primitive_time += timer_elapsed_ms(&ctx->timer);
 }
 
 processed_triangle_t get_triangle(mesh_t* mesh, primitive_pass_ctx_t* ctx, int idx) {
-	int gi = ctx->original_indices[idx];
+	int gi = ctx->start_index + idx;
 	clip_triangle_t* ct = &ctx->triangles[idx];
 
 	tinyobj_vertex_index_t f0 = mesh->attrib.faces[gi * 3 + 0];

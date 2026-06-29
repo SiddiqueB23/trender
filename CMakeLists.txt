@@ -21,6 +21,11 @@ if(MSVC)
   set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG")
 else()
   # GCC/Clang
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-fno-omit-frame-pointer)
+    # add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    # add_link_options(-fsanitize=address)
+  endif()
   add_compile_options(-Wall -Wextra -Wno-unknown-pragmas -pedantic -g -O3 -march=native -mtune=native -pthread)
   
   # Native optimization only for native builds (not cross-compiling)

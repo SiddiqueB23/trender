@@ -443,8 +443,10 @@ static inline int trender_ctx_init(trender_ctx_t* ctx, mesh_t* mesh, int rows, i
 	 * against render-chunk bounds), so create_primitive_pass_ctx takes both
 	 * num_render_pass_chunks_y and num_render_pass_chunks_x as its chunk counts. */
 	for (int c = 0; c < num_prim_pass_chunks; c++) {
-		int num_triangles_per_chunk = (int)mesh->attrib.num_face_num_verts / num_prim_pass_chunks + num_prim_pass_chunks;
-		ctx->primitive_ctx[c] = create_primitive_pass_ctx(num_triangles_per_chunk, num_render_pass_chunks_y, num_render_pass_chunks_x);
+		int num_triangles = (int)mesh->attrib.num_face_num_verts;
+		int start_index = (num_triangles * c) / num_prim_pass_chunks;
+		int end_index = (num_triangles * (c + 1)) / num_prim_pass_chunks;
+		ctx->primitive_ctx[c] = create_primitive_pass_ctx(mesh, start_index, end_index, num_render_pass_chunks_y, num_render_pass_chunks_x);
 		ctx->primitive_ctx[c].width  = cols;
 		ctx->primitive_ctx[c].height = rows;
 	}
@@ -551,7 +553,7 @@ void worker_thread_process_primitives(task_t* task, worker_arg_t* wa, int* overr
 	int end_index = (num_triangles * (c + 1)) / num_prim_pass_chunks;
 	int rp_idx = task->frame % (sched->num_buffers * 2);
 	render_params_copy(&ctx->primitive_ctx[c].params, &sched->render_params_buf[rp_idx]);
-	primitive_pass(wa->mesh, &ctx->primitive_ctx[c], start_index, end_index);
+	primitive_pass(&ctx->primitive_ctx[c], start_index, end_index);
 
 	thread_mutex_lock(&sched->state_mutex);
 	int chunk_y = task->chunk_y;
