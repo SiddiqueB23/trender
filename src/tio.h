@@ -412,8 +412,8 @@ int tio_get_window_size_pixels(tio_ctx_t* ctx, int* pixel_w, int* pixel_h) {
 	 * Typical console fonts (Cascadia Code, Consolas) are close to 1:2 ratio. */
 	int estimated = 0;
 	if (cell_w == 0) {
-		cell_w = cell_h / 2;
-		estimated = 1;
+		cell_w = 10;
+		cell_h = 20;
 	}
 
 	*pixel_w = cols * cell_w;
