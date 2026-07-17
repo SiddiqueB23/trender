@@ -719,6 +719,7 @@ void worker_thread_display_frame(task_t* task, worker_arg_t* wa, int* override_n
 			printf("\r\n");
 			printf("Screen size: %d rows, %d cols, %d pixels          \r\n", ctx->rows, ctx->cols, ctx->rows * ctx->cols);
 			printf("Display:       %0.2f                              \r\n", ctx->display_time);
+			printf("Controls: WASD move  QE up/down  Arrows look  Q/Ctrl+Q quit          \r\n");
 			fflush(stdout);
 		}
 	}
