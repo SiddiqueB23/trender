@@ -773,8 +773,8 @@ int main(int argc, char* argv[]) {
         }
 
         tio_trace_display_refresh(&display, &params, trace);
-        tio_trace_display_output(&display, &tio_ctx, &legend);
         tio_trace_legend_refresh(&legend, &params);
+        tio_trace_display_output(&display, &tio_ctx, &legend);
         tio_trace_legend_output(&legend, &tio_ctx, &params);
 
         if (!quit_requested) trace_sleep_ms(16);
